@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from telethon import Button, TelegramClient, events
-from telethon.sessions import StringSession
 
 from filters.relevance import RelevanceFilter
 
@@ -139,10 +138,10 @@ async def main() -> None:
     tenants = load_tenants()
     if not tenants:
         raise RuntimeError("Не найдены tenant-конфиги в config/tenants")
+    if not global_cfg.get("bot_token"):
+        raise RuntimeError("Не задан BOT_TOKEN")
 
-    session = StringSession(global_cfg["session_string"]) if global_cfg.get("session_string") else global_cfg.get("session_name", "session")
-    user_client = TelegramClient(session, global_cfg["api_id"], global_cfg["api_hash"])
-    bot_client = TelegramClient("bot_session", global_cfg["api_id"], global_cfg["api_hash"])
+    bot_client = TelegramClient(global_cfg.get("session_name", "bot_session"), global_cfg["api_id"], global_cfg["api_hash"])
     await bot_client.start(bot_token=global_cfg["bot_token"])
     model_cache: dict[str, RelevanceFilter] = {}
 
@@ -153,7 +152,7 @@ async def main() -> None:
             _, token, label_raw = data.split(":")
             await handle_label_callback(event, token, int(label_raw))
 
-    @user_client.on(events.NewMessage())
+    @bot_client.on(events.NewMessage())
     async def keyword_alert_handler(event):
         text = event.message.message or ""
         if not text:
@@ -203,11 +202,8 @@ async def main() -> None:
             for admin_id in tenant_cfg.get("admins", []):
                 await bot_client.send_message(admin_id, body, buttons=buttons)
 
-    await user_client.start()
     print("Бот запущен", flush=True)
-    user_task = asyncio.create_task(user_client.run_until_disconnected())
     await bot_client.run_until_disconnected()
-    await user_task
 
 
 if __name__ == "__main__":
