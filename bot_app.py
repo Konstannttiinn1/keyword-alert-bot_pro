@@ -142,7 +142,8 @@ async def main() -> None:
 
     session = StringSession(global_cfg["session_string"]) if global_cfg.get("session_string") else global_cfg.get("session_name", "session")
     user_client = TelegramClient(session, global_cfg["api_id"], global_cfg["api_hash"])
-    bot_client = TelegramClient("bot_session", global_cfg["api_id"], global_cfg["api_hash"]).start(bot_token=global_cfg["bot_token"])
+    bot_client = TelegramClient("bot_session", global_cfg["api_id"], global_cfg["api_hash"])
+    await bot_client.start(bot_token=global_cfg["bot_token"])
     model_cache: dict[str, RelevanceFilter] = {}
 
     @bot_client.on(events.CallbackQuery)
@@ -202,10 +203,11 @@ async def main() -> None:
             for admin_id in tenant_cfg.get("admins", []):
                 await bot_client.send_message(admin_id, body, buttons=buttons)
 
-    print("🚀 Бот запущен в multi-tenant режиме", flush=True)
     await user_client.start()
-    await bot_client.start()
-    await asyncio.gather(user_client.run_until_disconnected(), bot_client.run_until_disconnected())
+    print("Бот запущен", flush=True)
+    user_task = asyncio.create_task(user_client.run_until_disconnected())
+    await bot_client.run_until_disconnected()
+    await user_task
 
 
 if __name__ == "__main__":
