@@ -1,0 +1,14 @@
+{
+  "tenant_id": "demo",
+  "admins": [8333432274],
+  "chats": [-10011111111, -10022222222],
+  "keywords": ["vpn", "впн"],
+  "context_filter": {
+    "enabled": true,
+    "model_path": "models/demo/relevance.joblib",
+    "threshold_alert": 0.45,
+    "threshold_drop": 0.15,
+    "collect_candidates": true
+  },
+  "llm": { "enabled": false }
+}
