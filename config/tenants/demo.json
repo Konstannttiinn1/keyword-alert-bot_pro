@@ -30,7 +30,10 @@
   "routing": {
     "alert_chat_id": -10044444444,
     "review_chat_id": -10055555555,
-    "data_chat_id": -10066666666
+    "data_chat_id": -10066666666,
+    "alert_thread_id": 123,
+    "review_thread_id": 456,
+    "data_thread_id": 789
   },
   "llm": { "enabled": false }
 }

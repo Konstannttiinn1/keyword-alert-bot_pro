@@ -323,6 +323,7 @@ def admin_menu_buttons(tenant_id: str):
         [Button.inline("➕ Добавить ключевое слово", f"adm:add_kw:{tenant_id}"), Button.inline("➖ Удалить ключевое слово", f"adm:del_kw:{tenant_id}")],
         [Button.inline("➕ Добавить чат", f"adm:add_chat:{tenant_id}"), Button.inline("➖ Удалить чат", f"adm:del_chat:{tenant_id}")],
         [Button.inline("📄 Показать настройки", f"adm:show:{tenant_id}")],
+        [Button.inline("🧭 routing", f"adm:routing:{tenant_id}")],
         [Button.inline("📥 Импорт датасета", f"adm:import:{tenant_id}"), Button.inline("🎓 Обучить модель", f"adm:train:{tenant_id}")],
     ]
 
@@ -332,6 +333,76 @@ def import_choice_buttons(tenant_id: str):
         [Button.inline("✅ Релевантные", f"adm:import_rel:{tenant_id}"), Button.inline("❌ Нерелевантные", f"adm:import_not:{tenant_id}")],
         [Button.inline("⬅️ Назад", f"adm:back:{tenant_id}")],
     ]
+
+
+def routing_menu_buttons(tenant_id: str):
+    return [
+        [Button.inline("✅ Bind ALERT", f"adm:bind_route:{tenant_id}:alert")],
+        [Button.inline("❓ Bind UNCERTAIN", f"adm:bind_route:{tenant_id}:review")],
+        [Button.inline("🧊 Bind DROP", f"adm:bind_route:{tenant_id}:data")],
+        [Button.inline("🧹 Clear routing", f"adm:clear_routing:{tenant_id}")],
+        [Button.inline("⬅️ Back", f"adm:back:{tenant_id}")],
+    ]
+
+
+def apply_route_bind(cfg: dict[str, Any], kind: str, chat_id: int, thread_id: int | None) -> dict[str, Any]:
+    route_map = {
+        "alert": ("alert_chat_id", "alert_thread_id"),
+        "review": ("review_chat_id", "review_thread_id"),
+        "data": ("data_chat_id", "data_thread_id"),
+    }
+    if kind not in route_map:
+        raise ValueError("Неверный тип маршрута")
+
+    chat_key, thread_key = route_map[kind]
+    cfg.setdefault("routing", {})
+    cfg["routing"][chat_key] = int(chat_id)
+    if thread_id is None:
+        cfg["routing"].pop(thread_key, None)
+    else:
+        cfg["routing"][thread_key] = int(thread_id)
+    return cfg
+
+
+def clear_routing(cfg: dict[str, Any]) -> dict[str, Any]:
+    routing = cfg.setdefault("routing", {})
+    for key in [
+        "alert_chat_id",
+        "review_chat_id",
+        "data_chat_id",
+        "alert_thread_id",
+        "review_thread_id",
+        "data_thread_id",
+    ]:
+        routing.pop(key, None)
+    return cfg
+
+
+def extract_thread_id(message: Any) -> int | None:
+    reply_to = getattr(message, "reply_to", None)
+    if reply_to is not None:
+        top_id = getattr(reply_to, "reply_to_top_id", None)
+        if top_id:
+            return int(top_id)
+    top_direct = getattr(message, "reply_to_top_id", None)
+    if top_direct:
+        return int(top_direct)
+    return None
+
+
+async def send_with_routing(bot_client: TelegramClient, routing: dict[str, Any], kind: str, text: str, buttons=None) -> bool:
+    chat_key = f"{kind}_chat_id"
+    thread_key = f"{kind}_thread_id"
+    chat_id = routing.get(chat_key)
+    if not chat_id:
+        return False
+
+    thread_id = routing.get(thread_key)
+    if thread_id:
+        await bot_client.send_message(int(chat_id), text, buttons=buttons, reply_to=int(thread_id))
+    else:
+        await bot_client.send_message(int(chat_id), text, buttons=buttons)
+    return True
 
 
 def format_settings(cfg: dict[str, Any]) -> str:
@@ -356,8 +427,11 @@ def format_settings(cfg: dict[str, Any]) -> str:
         f"candidates_retention_days: {storage.get('candidates_retention_days')}\n"
         f"candidates_dedupe_window_days: {storage.get('candidates_dedupe_window_days')}\n"
         f"routing.alert_chat_id: {routing.get('alert_chat_id')}\n"
+        f"routing.alert_thread_id: {routing.get('alert_thread_id')}\n"
         f"routing.review_chat_id: {routing.get('review_chat_id')}\n"
-        f"routing.data_chat_id: {routing.get('data_chat_id')}"
+        f"routing.review_thread_id: {routing.get('review_thread_id')}\n"
+        f"routing.data_chat_id: {routing.get('data_chat_id')}\n"
+        f"routing.data_thread_id: {routing.get('data_thread_id')}"
     )
 
 
@@ -471,6 +545,28 @@ async def main() -> None:
                 await event.edit(format_settings(tenants[tenant_id]), buttons=[[Button.inline("⬅️ Назад", f"adm:back:{tenant_id}")]])
                 return
 
+            if data.startswith("adm:routing:"):
+                await event.edit("Настройка routing:", buttons=routing_menu_buttons(tenant_id))
+                return
+
+            if data.startswith("adm:bind_route:"):
+                _, _, _, t_id, route_kind = data.split(":", 4)
+                ADMIN_STATE[sender.id] = {
+                    "action": "await_bind_route",
+                    "tenant_id": t_id,
+                    "route_kind": route_kind,
+                }
+                await event.respond("Перейди в нужную тему и отправь /bind")
+                await event.answer()
+                return
+
+            if data.startswith("adm:clear_routing:"):
+                cfg = tenants[tenant_id]
+                clear_routing(cfg)
+                await save_tenant_cfg(cfg)
+                await event.edit("Routing очищен", buttons=routing_menu_buttons(tenant_id))
+                return
+
             if data.startswith("adm:import:"):
                 await event.edit("Выберите тип импортируемых примеров", buttons=import_choice_buttons(tenant_id))
                 return
@@ -517,6 +613,43 @@ async def main() -> None:
                     await event.respond("Доступ запрещён")
                     return
                 await event.respond("Меню управления:", buttons=admin_menu_buttons(matched_tenant))
+                return
+
+            if event.raw_text and event.raw_text.strip().startswith("/bind"):
+                parts = event.raw_text.strip().split()
+                state = ADMIN_STATE.get(sender.id)
+                route_kind = None
+                tenant_id_for_bind = None
+
+                if len(parts) > 1:
+                    kind_raw = parts[1].lower()
+                    route_kind = {"alert": "alert", "review": "review", "uncertain": "review", "data": "data", "drop": "data"}.get(kind_raw)
+                    tenant_id_for_bind = matched_tenant
+                elif state and state.get("action") == "await_bind_route":
+                    route_kind = state.get("route_kind")
+                    tenant_id_for_bind = state.get("tenant_id")
+
+                if route_kind not in {"alert", "review", "data"} or not tenant_id_for_bind:
+                    await event.respond("Не удалось определить маршрут. Используйте /bind alert|review|data или кнопку Bind.")
+                    return
+
+                cfg = tenants.get(tenant_id_for_bind)
+                if not cfg or sender.id not in cfg.get("admins", []):
+                    await event.respond("Доступ запрещён")
+                    return
+
+                thread_id = extract_thread_id(event.message)
+                apply_route_bind(cfg, route_kind, int(event.chat_id), thread_id)
+                await save_tenant_cfg(cfg)
+                if state and state.get("action") == "await_bind_route":
+                    ADMIN_STATE.pop(sender.id, None)
+
+                if thread_id is None:
+                    await event.respond(
+                        f"Маршрут {route_kind} привязан: chat_id={event.chat_id}. thread_id не найден, привязал в чат без темы."
+                    )
+                else:
+                    await event.respond(f"Маршрут {route_kind} привязан: chat_id={event.chat_id}, thread_id={thread_id}")
                 return
 
             state = ADMIN_STATE.get(sender.id)
@@ -615,10 +748,11 @@ async def main() -> None:
                     print(f"[Pipeline] tenant={tenant_id} drop chat_id={event.chat_id}", flush=True)
                     was_saved = save_candidate_if_needed(tenant_cfg, text, found_keyword, event.chat_id, event.message.id)
                     routing = tenant_cfg.get("routing", {})
-                    data_chat_id = routing.get("data_chat_id")
-                    if was_saved and data_chat_id:
-                        await bot_client.send_message(
-                            int(data_chat_id),
+                    if was_saved:
+                        await send_with_routing(
+                            bot_client,
+                            routing,
+                            "data",
                             (
                                 f"🗂 DROP candidate | tenant={tenant_id}\n"
                                 f"source_chat_id={event.chat_id}\n"
@@ -652,14 +786,11 @@ async def main() -> None:
                 buttons = [[Button.inline("✅ Релевантно", f"lbl:{token}:1"), Button.inline("❌ Нерелевантно", f"lbl:{token}:0")]]
 
                 routing = tenant_cfg.get("routing", {})
-                target_chat_id = None
-                if result.decision == "ALERT":
-                    target_chat_id = routing.get("alert_chat_id")
-                elif result.decision == "UNCERTAIN":
-                    target_chat_id = routing.get("review_chat_id")
+                route_kind = "alert" if result.decision == "ALERT" else "review"
+                sent_by_routing = await send_with_routing(bot_client, routing, route_kind, body, buttons=buttons)
 
-                if target_chat_id:
-                    await bot_client.send_message(int(target_chat_id), body, buttons=buttons)
+                if sent_by_routing:
+                    target_chat_id = routing.get(f"{route_kind}_chat_id")
                     print(
                         f"[Pipeline] tenant={tenant_id} sent decision={result.decision} target_chat_id={target_chat_id} source_chat_id={event.chat_id}",
                         flush=True,
