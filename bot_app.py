@@ -23,6 +23,7 @@ TENANTS_DIR = CONFIG_DIR / "tenants"
 CONFIG_LOCK = asyncio.Lock()
 LABEL_CONTEXT: dict[str, dict[str, Any]] = {}
 ADMIN_STATE: dict[int, dict[str, Any]] = {}
+SAVED_ALERT_IDS: set[str] = set()
 
 
 @dataclass
@@ -124,15 +125,38 @@ def append_dataset_entry(entry: dict[str, Any]) -> None:
     append_jsonl(BASE_DIR / "data" / tenant_id / "dataset.jsonl", entry)
 
 
-async def handle_label_callback(event, token: str, label: int) -> bool:
+def is_alert_saved(tenant_id: str, alert_id: str) -> bool:
+    if alert_id in SAVED_ALERT_IDS:
+        return True
+
+    dataset_path = BASE_DIR / "data" / tenant_id / "dataset.jsonl"
+    if not dataset_path.exists():
+        return False
+
+    with dataset_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("alert_id") == alert_id:
+                SAVED_ALERT_IDS.add(alert_id)
+                return True
+    return False
+
+
+async def handle_label_callback(token: str, label: int) -> bool:
     record = LABEL_CONTEXT.get(token)
     if not record:
-        await event.answer("Запись не найдена или устарела", alert=True)
+        return False
+
+    if is_alert_saved(record["tenant_id"], token):
         return False
 
     append_dataset_entry(
         {
             "tenant_id": record["tenant_id"],
+            "alert_id": token,
             "text": record["text"],
             "label": label,
             "keyword": record["keyword"],
@@ -143,7 +167,7 @@ async def handle_label_callback(event, token: str, label: int) -> bool:
             "source": "telegram",
         }
     )
-    await event.answer("Сохранено в датасет", alert=False)
+    SAVED_ALERT_IDS.add(token)
     return True
 
 
@@ -220,7 +244,17 @@ async def main() -> None:
 
             if data.startswith("lbl:"):
                 _, token, label_raw = data.split(":")
-                await handle_label_callback(event, token, int(label_raw))
+                record = LABEL_CONTEXT.get(token)
+                if not record:
+                    await event.answer("Уже сохранено", alert=False)
+                    return
+
+                if is_alert_saved(record["tenant_id"], token):
+                    await event.answer("Уже сохранено", alert=False)
+                    return
+
+                await event.answer("Сохранено", alert=False)
+                await handle_label_callback(token, int(label_raw))
                 return
 
             tenants = load_tenants_with_paths()
