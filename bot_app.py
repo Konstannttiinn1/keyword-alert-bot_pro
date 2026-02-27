@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from telethon import Button, TelegramClient, events
+from telethon.sessions import StringSession
 
 from filters.relevance import RelevanceFilter
 
@@ -141,70 +142,82 @@ async def main() -> None:
     if not global_cfg.get("bot_token"):
         raise RuntimeError("Не задан BOT_TOKEN")
 
-    bot_client = TelegramClient(global_cfg.get("session_name", "bot_session"), global_cfg["api_id"], global_cfg["api_hash"])
-    await bot_client.start(bot_token=global_cfg["bot_token"])
+    session_string = global_cfg.get("session_string", "")
+    string_session = StringSession(session_string) if session_string else StringSession()
+    bot_client = TelegramClient(string_session, global_cfg["api_id"], global_cfg["api_hash"])
     model_cache: dict[str, RelevanceFilter] = {}
 
-    @bot_client.on(events.CallbackQuery)
-    async def callback_handler(event):
-        data = event.data.decode("utf-8")
-        if data.startswith("lbl:"):
-            _, token, label_raw = data.split(":")
-            await handle_label_callback(event, token, int(label_raw))
+    try:
+        await bot_client.start(bot_token=global_cfg["bot_token"])
+        if not session_string:
+            print("Скопируйте session_string в config/global.json:")
+            print(bot_client.session.save())
 
-    @bot_client.on(events.NewMessage())
-    async def keyword_alert_handler(event):
-        text = event.message.message or ""
-        if not text:
-            return
+        @bot_client.on(events.CallbackQuery)
+        async def callback_handler(event):
+            data = event.data.decode("utf-8")
+            if data.startswith("lbl:"):
+                _, token, label_raw = data.split(":")
+                await handle_label_callback(event, token, int(label_raw))
 
-        for tenant_id, tenant_cfg in tenants.items():
-            chats = {str(chat_id) for chat_id in tenant_cfg.get("chats", [])}
-            if str(event.chat_id) not in chats:
-                continue
+        @bot_client.on(events.NewMessage())
+        async def keyword_alert_handler(event):
+            text = event.message.message or ""
+            if not text:
+                return
 
-            lower = text.lower()
-            found_keyword = next((kw for kw in tenant_cfg.get("keywords", []) if kw.lower() in lower), None)
-            if not found_keyword:
-                continue
+            for tenant_id, tenant_cfg in tenants.items():
+                chats = {str(chat_id) for chat_id in tenant_cfg.get("chats", [])}
+                if str(event.chat_id) not in chats:
+                    continue
 
-            result = evaluate_message(tenant_cfg, text, model_cache)
-            if result.decision == "DROP":
-                save_candidate_if_needed(tenant_cfg, text, found_keyword, event.chat_id, event.message.id)
-                continue
+                lower = text.lower()
+                found_keyword = next((kw for kw in tenant_cfg.get("keywords", []) if kw.lower() in lower), None)
+                if not found_keyword:
+                    continue
 
-            decision_line = f"Relevance score: {result.score:.2f} | Decision: {result.decision}"
-            link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}" if str(event.chat_id).startswith("-100") else "(нет ссылки)"
-            body = (
-                f"🚨 Совпадение по tenant: {tenant_id}\n"
-                f"Ключевое слово: {found_keyword}\n"
-                f"Сообщение: {text[:700]}\n"
-                f"{decision_line}\n"
-                f"Ссылка: {link}"
-            )
+                result = evaluate_message(tenant_cfg, text, model_cache)
+                if result.decision == "DROP":
+                    save_candidate_if_needed(tenant_cfg, text, found_keyword, event.chat_id, event.message.id)
+                    continue
 
-            token = uuid.uuid4().hex[:10]
-            LABEL_CONTEXT[token] = {
-                "tenant_id": tenant_id,
-                "text": text,
-                "keyword": found_keyword,
-                "chat_id": event.chat_id,
-                "message_id": event.message.id,
-                "is_forward": bool(event.message.fwd_from),
-            }
-            buttons = [
-                [
-                    Button.inline("✅ Релевантно", f"lbl:{token}:1"),
-                    Button.inline("❌ Нерелевантно", f"lbl:{token}:0"),
+                decision_line = f"Relevance score: {result.score:.2f} | Decision: {result.decision}"
+                link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}" if str(event.chat_id).startswith("-100") else "(нет ссылки)"
+                body = (
+                    f"🚨 Совпадение по tenant: {tenant_id}\n"
+                    f"Ключевое слово: {found_keyword}\n"
+                    f"Сообщение: {text[:700]}\n"
+                    f"{decision_line}\n"
+                    f"Ссылка: {link}"
+                )
+
+                token = uuid.uuid4().hex[:10]
+                LABEL_CONTEXT[token] = {
+                    "tenant_id": tenant_id,
+                    "text": text,
+                    "keyword": found_keyword,
+                    "chat_id": event.chat_id,
+                    "message_id": event.message.id,
+                    "is_forward": bool(event.message.fwd_from),
+                }
+                buttons = [
+                    [
+                        Button.inline("✅ Релевантно", f"lbl:{token}:1"),
+                        Button.inline("❌ Нерелевантно", f"lbl:{token}:0"),
+                    ]
                 ]
-            ]
 
-            for admin_id in tenant_cfg.get("admins", []):
-                await bot_client.send_message(admin_id, body, buttons=buttons)
+                for admin_id in tenant_cfg.get("admins", []):
+                    await bot_client.send_message(admin_id, body, buttons=buttons)
 
-    print("Бот запущен", flush=True)
-    await bot_client.run_until_disconnected()
+        print("Бот запущен", flush=True)
+        await bot_client.run_until_disconnected()
+    finally:
+        await bot_client.disconnect()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Остановка бота", flush=True)
