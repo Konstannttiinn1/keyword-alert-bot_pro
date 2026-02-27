@@ -47,12 +47,8 @@ def build_pipeline():
     )
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--tenant", required=True)
-    args = parser.parse_args()
-
-    dataset_path = BASE_DIR / "data" / args.tenant / "dataset.jsonl"
+def train_for_tenant(tenant_id: str) -> dict:
+    dataset_path = BASE_DIR / "data" / tenant_id / "dataset.jsonl"
     texts, labels = load_dataset(dataset_path)
     if len(set(labels)) < 2:
         raise RuntimeError("Нужно минимум 2 класса (0 и 1) в dataset.jsonl")
@@ -65,7 +61,7 @@ def main():
     recall_pos = recall_score(y_test, y_pred, pos_label=1)
     report = classification_report(y_test, y_pred, output_dict=True)
 
-    model_dir = BASE_DIR / "models" / args.tenant
+    model_dir = BASE_DIR / "models" / tenant_id
     model_dir.mkdir(parents=True, exist_ok=True)
     model_path = model_dir / "relevance.joblib"
     metadata_path = model_dir / "metadata.json"
@@ -81,9 +77,23 @@ def main():
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print(f"Dataset size: {len(labels)}")
-    print(f"Recall(label=1): {recall_pos:.4f}")
-    print("Model saved:", model_path)
+    return {
+        "dataset_size": len(labels),
+        "recall_label_1": recall_pos,
+        "model_path": str(model_path),
+        "date": metadata["date"],
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tenant", required=True)
+    args = parser.parse_args()
+
+    result = train_for_tenant(args.tenant)
+    print(f"Dataset size: {result['dataset_size']}")
+    print(f"Recall(label=1): {result['recall_label_1']:.4f}")
+    print("Model saved:", result["model_path"])
 
 
 if __name__ == "__main__":
