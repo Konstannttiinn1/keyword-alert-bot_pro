@@ -413,12 +413,22 @@ async def main() -> None:
                     continue
 
                 lower = text.lower()
-                found_keyword = next((kw for kw in tenant_cfg.get("keywords", []) if kw.lower() in lower), None)
+                tenant_keywords = tenant_cfg.get("keywords", [])
+                print(
+                    f"[Pipeline] tenant={tenant_id} text='{text[:120]}' keywords={tenant_keywords}",
+                    flush=True,
+                )
+                found_keyword = next((kw for kw in tenant_keywords if kw.lower() in lower), None)
                 if not found_keyword:
+                    print(f"[Pipeline] tenant={tenant_id} keyword_match=нет | skip: no keyword match", flush=True)
                     continue
 
+                print(f"[Pipeline] tenant={tenant_id} match keyword={found_keyword}", flush=True)
+
                 result = evaluate_message(tenant_cfg, text, model_cache)
+                print(f"[Pipeline] tenant={tenant_id} decision={result.decision}", flush=True)
                 if result.decision == "DROP":
+                    print(f"[Pipeline] tenant={tenant_id} drop chat_id={event.chat_id}", flush=True)
                     save_candidate_if_needed(tenant_cfg, text, found_keyword, event.chat_id, event.message.id)
                     continue
 
@@ -445,6 +455,10 @@ async def main() -> None:
 
                 for admin_id in tenant_cfg.get("admins", []):
                     await bot_client.send_message(admin_id, body, buttons=buttons)
+                    print(
+                        f"[Pipeline] tenant={tenant_id} sent decision={result.decision} admin_id={admin_id} source_chat_id={event.chat_id}",
+                        flush=True,
+                    )
 
         print("Бот запущен", flush=True)
         await bot_client.run_until_disconnected()
