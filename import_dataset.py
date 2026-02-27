@@ -47,6 +47,32 @@ def append_jsonl(path: Path, rows: list[dict]):
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def build_rows(tenant_id: str, texts: list[str], label: int, now_iso: str | None = None) -> list[dict]:
+    now = now_iso or datetime.now(timezone.utc).isoformat()
+    return [
+        {
+            "tenant_id": tenant_id,
+            "text": text,
+            "label": label,
+            "keyword": "bulk_import",
+            "chat_id": None,
+            "message_id": None,
+            "is_forward": False,
+            "ts": now,
+            "source": "bulk_import",
+        }
+        for text in texts
+    ]
+
+
+def import_file_to_dataset(tenant_id: str, file_path: Path, label: int) -> int:
+    dataset_path = BASE_DIR / "data" / tenant_id / "dataset.jsonl"
+    texts = read_messages(file_path)
+    rows = build_rows(tenant_id=tenant_id, texts=texts, label=label)
+    append_jsonl(dataset_path, rows)
+    return len(rows)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tenant", required=True)
@@ -54,38 +80,9 @@ def main():
     parser.add_argument("--not_relevant", required=True)
     args = parser.parse_args()
 
-    dataset_path = BASE_DIR / "data" / args.tenant / "dataset.jsonl"
-    now = datetime.now(timezone.utc).isoformat()
-
-    rows = []
-    for text in read_messages(Path(args.relevant)):
-        rows.append({
-            "tenant_id": args.tenant,
-            "text": text,
-            "label": 1,
-            "keyword": "bulk_import",
-            "chat_id": None,
-            "message_id": None,
-            "is_forward": False,
-            "ts": now,
-            "source": "bulk_import",
-        })
-
-    for text in read_messages(Path(args.not_relevant)):
-        rows.append({
-            "tenant_id": args.tenant,
-            "text": text,
-            "label": 0,
-            "keyword": "bulk_import",
-            "chat_id": None,
-            "message_id": None,
-            "is_forward": False,
-            "ts": now,
-            "source": "bulk_import",
-        })
-
-    append_jsonl(dataset_path, rows)
-    print(f"Импортировано записей: {len(rows)}")
+    relevant_count = import_file_to_dataset(args.tenant, Path(args.relevant), 1)
+    not_relevant_count = import_file_to_dataset(args.tenant, Path(args.not_relevant), 0)
+    print(f"Импортировано записей: {relevant_count + not_relevant_count}")
 
 
 if __name__ == "__main__":
