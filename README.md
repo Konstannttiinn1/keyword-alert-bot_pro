@@ -52,7 +52,10 @@ Multi-tenant Telegram-бот для мониторинга ключевых сл
   "routing": {
     "alert_chat_id": -10044444444,
     "review_chat_id": -10055555555,
-    "data_chat_id": -10066666666
+    "data_chat_id": -10066666666,
+    "alert_thread_id": 123,
+    "review_thread_id": 456,
+    "data_thread_id": 789
   }
 }
 ```
@@ -64,7 +67,17 @@ Multi-tenant Telegram-бот для мониторинга ключевых сл
   - `alert_chat_id` — куда отправлять `ALERT`
   - `review_chat_id` — куда отправлять `UNCERTAIN`
   - `data_chat_id` — куда отправлять уведомление о сохранённом `DROP`-кандидате (опционально)
+  - `alert_thread_id` / `review_thread_id` / `data_thread_id` — ID темы (topic), отправка через `reply_to`
 - если `routing` не задан — отправка остаётся по `admins` (как раньше).
+
+## 1.1) Привязка routing к темам через кнопки
+
+- В личке бота откройте `/start` → `🧭 routing`.
+- Нажмите `Bind ALERT` / `Bind UNCERTAIN` / `Bind DROP`.
+- Перейдите в нужную тему супергруппы и отправьте `/bind`.
+- Альтернатива: `/bind alert|review|data` прямо в теме.
+
+Бот привяжет `chat_id` и (если найден) `thread_id`. Если команда выполнена вне темы, привязка делается к чату без `thread_id`.
 
 ## 2) Где хранятся данные и модель
 
