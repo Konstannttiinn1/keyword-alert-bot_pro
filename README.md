@@ -21,21 +21,70 @@ Multi-tenant Telegram-бот для мониторинга ключевых сл
 ### Конфигурация тенанта
 Файл: `config/tenants/<tenant_id>.json`, пример `config/tenants/demo.json`.
 
-Там задаются:
-- `admins` — кто получает алерты
-- `chats` — какие чаты мониторить
-- `keywords` — триггер-слова
-- `context_filter` — путь к модели и пороги
+```json
+{
+  "tenant_id": "demo",
+  "admins": [8333432274],
+  "chats": [-10011111111, -10022222222],
+  "chat_groups": {
+    "project_main": [-10011111111, -10022222222]
+  },
+  "chat_labels": {
+    "-10011111111": "основной",
+    "-10022222222": "саппорт"
+  },
+  "keywords": ["vpn", "впн"],
+  "context_filter": {
+    "enabled": true,
+    "model_path": "models/demo/relevance.joblib",
+    "threshold_alert": 0.45,
+    "threshold_drop": 0.15,
+    "collect_candidates": true
+  },
+  "storage": {
+    "collect_candidates": true,
+    "candidates_sample_rate": 1.0,
+    "candidates_max_mb": 20,
+    "candidates_max_lines": 200000,
+    "candidates_retention_days": 14,
+    "candidates_dedupe_window_days": 7
+  },
+  "routing": {
+    "alert_chat_id": -10044444444,
+    "review_chat_id": -10055555555,
+    "data_chat_id": -10066666666
+  }
+}
+```
+
+Ключевые моменты:
+- `chats` + все ID из `chat_groups` участвуют в tenant-match.
+- `chat_labels` используются в логах и алертах как метка под-чата.
+- `routing`:
+  - `alert_chat_id` — куда отправлять `ALERT`
+  - `review_chat_id` — куда отправлять `UNCERTAIN`
+  - `data_chat_id` — куда отправлять уведомление о сохранённом `DROP`-кандидате (опционально)
+- если `routing` не задан — отправка остаётся по `admins` (как раньше).
 
 ## 2) Где хранятся данные и модель
 
 Для каждого тенанта:
 - `data/<tenant_id>/dataset.jsonl` — размеченный датасет
 - `data/<tenant_id>/candidates.jsonl` — кандидаты из DROP
+- `data/<tenant_id>/candidates_YYYY-MM-DD_HHMMSS.jsonl` — ротированные архивы кандидатов
 - `models/<tenant_id>/relevance.joblib` — обученная модель
 - `models/<tenant_id>/metadata.json` — метрики и дата обучения
 
-## 3) Импорт датасета (TXT/DOCX)
+## 3) Контроль роста candidates (sampling/dedupe/rotation)
+
+Для `DROP`-кандидатов доступны ограничения через `storage`:
+- `candidates_sample_rate` — случайная выборка 0..1 перед записью
+- `candidates_dedupe_window_days` — дедупликация одинакового нормализованного текста по hash
+- `candidates_max_mb` / `candidates_max_lines` — лимиты текущего файла
+- при превышении лимита выполняется ротация в `candidates_*.jsonl`
+- затем retention чистит старые архивы (`candidates_retention_days`)
+
+## 4) Импорт датасета (TXT/DOCX)
 
 ```bash
 python import_dataset.py --tenant demo --relevant relevant.docx --not_relevant not_relevant.txt
@@ -45,7 +94,7 @@ python import_dataset.py --tenant demo --relevant relevant.docx --not_relevant n
 - DOCX: берутся непустые абзацы
 - если строка начинается с `текст:`, сохраняется только часть после префикса
 
-## 4) Обучение ML-модели
+## 5) Обучение ML-модели
 
 ```bash
 python train_relevance_model.py --tenant demo
@@ -58,7 +107,7 @@ python train_relevance_model.py --tenant demo
 - вывод метрик, включая **recall для label=1**
 - сохранение модели и `metadata.json`
 
-## 5) Запуск бота локально (Windows)
+## 6) Запуск бота локально (Windows)
 
 ```powershell
 python -m venv .venv
@@ -68,21 +117,3 @@ copy .env.example .env
 # Заполните BOT_TOKEN в .env, а также config/global.json
 python Keyword-alert.py
 ```
-
-## 6) Логика релевантности (high recall)
-
-После keyword match:
-- `score >= threshold_alert` → ALERT
-- `score <= threshold_drop` → DROP (не отправляем, можно складывать в `candidates.jsonl`)
-- иначе → UNCERTAIN (всё равно отправляем)
-
-В алерте всегда есть:
-`Relevance score: 0.xx | Decision: ALERT/UNCERTAIN`
-
-## 7) Inline-разметка в Telegram
-
-Под алертом есть кнопки:
-- `✅ Релевантно`
-- `❌ Нерелевантно`
-
-По клику запись добавляется в `data/<tenant_id>/dataset.jsonl`, и бот отвечает: `Сохранено в датасет`.

@@ -1,17 +1,19 @@
 import asyncio
+import hashlib
 import json
 import os
+import random
 import tempfile
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from telethon import Button, TelegramClient, events
 from telethon.sessions import StringSession
 
-from filters.relevance import RelevanceFilter
+from filters.relevance import RelevanceFilter, normalize_text
 from import_dataset import import_file_to_dataset
 from train_relevance_model import train_for_tenant
 
@@ -101,23 +103,157 @@ def evaluate_message(tenant_cfg: dict[str, Any], text: str, model_cache: dict[st
     return DecisionResult(score=score, decision=decision)
 
 
-def save_candidate_if_needed(tenant_cfg: dict[str, Any], text: str, keyword: str, chat_id: int, message_id: int) -> None:
-    context = tenant_cfg.get("context_filter", {})
-    if context.get("collect_candidates"):
-        tenant_id = tenant_cfg["tenant_id"]
-        append_jsonl(
-            BASE_DIR / "data" / tenant_id / "candidates.jsonl",
-            {
-                "tenant_id": tenant_id,
-                "text": text,
-                "label": None,
-                "keyword": keyword,
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "source": "telegram",
-            },
-        )
+def _to_int_chat_id(value: Any) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def get_tenant_chat_ids(tenant_cfg: dict[str, Any]) -> set[int]:
+    chat_ids: set[int] = set()
+    for raw in tenant_cfg.get("chats", []):
+        chat_id = _to_int_chat_id(raw)
+        if chat_id is not None:
+            chat_ids.add(chat_id)
+
+    for _, group_chat_ids in tenant_cfg.get("chat_groups", {}).items():
+        for raw in group_chat_ids:
+            chat_id = _to_int_chat_id(raw)
+            if chat_id is not None:
+                chat_ids.add(chat_id)
+    return chat_ids
+
+
+def get_chat_label(tenant_cfg: dict[str, Any], chat_id: int) -> str | None:
+    labels = tenant_cfg.get("chat_labels", {})
+    return labels.get(str(chat_id)) or labels.get(chat_id)
+
+
+def _storage_cfg(tenant_cfg: dict[str, Any]) -> dict[str, Any]:
+    context_filter = tenant_cfg.get("context_filter", {})
+    storage = tenant_cfg.get("storage", {})
+    return {
+        "collect_candidates": storage.get("collect_candidates", context_filter.get("collect_candidates", False)),
+        "candidates_sample_rate": float(storage.get("candidates_sample_rate", 1.0)),
+        "candidates_max_mb": int(storage.get("candidates_max_mb", 20)),
+        "candidates_max_lines": int(storage.get("candidates_max_lines", 200000)),
+        "candidates_retention_days": int(storage.get("candidates_retention_days", 14)),
+        "candidates_dedupe_window_days": int(storage.get("candidates_dedupe_window_days", 7)),
+    }
+
+
+def _candidate_hash(text: str) -> str:
+    return hashlib.sha256(normalize_text(text).encode("utf-8")).hexdigest()
+
+
+def _iter_candidate_files(tenant_id: str) -> list[Path]:
+    data_dir = BASE_DIR / "data" / tenant_id
+    current = data_dir / "candidates.jsonl"
+    rotated = sorted(data_dir.glob("candidates_*.jsonl"), key=lambda p: p.stat().st_mtime)
+    return [*rotated, current]
+
+
+def _is_candidate_duplicate(tenant_id: str, dedupe_hash: str, window_days: int) -> bool:
+    if window_days <= 0:
+        return False
+    threshold = datetime.now(timezone.utc) - timedelta(days=window_days)
+
+    for path in _iter_candidate_files(tenant_id):
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("hash") != dedupe_hash:
+                    continue
+                ts_raw = row.get("ts")
+                if not ts_raw:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if ts >= threshold:
+                    return True
+    return False
+
+
+def _count_lines(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open("r", encoding="utf-8") as f:
+        return sum(1 for _ in f)
+
+
+def _rotate_candidates_if_needed(tenant_id: str, max_mb: int, max_lines: int) -> None:
+    candidates_path = BASE_DIR / "data" / tenant_id / "candidates.jsonl"
+    if not candidates_path.exists():
+        return
+
+    over_mb = max_mb > 0 and (candidates_path.stat().st_size / (1024 * 1024)) >= max_mb
+    over_lines = max_lines > 0 and _count_lines(candidates_path) >= max_lines
+    if not (over_mb or over_lines):
+        return
+
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    rotated_path = candidates_path.with_name(f"candidates_{ts}.jsonl")
+    os.replace(candidates_path, rotated_path)
+
+
+def _cleanup_candidate_archives(tenant_id: str, retention_days: int) -> None:
+    if retention_days <= 0:
+        return
+    data_dir = BASE_DIR / "data" / tenant_id
+    archives = sorted(data_dir.glob("candidates_*.jsonl"), key=lambda p: p.stat().st_mtime)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+
+    for path in archives:
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        if modified < cutoff:
+            path.unlink(missing_ok=True)
+
+    archives = sorted(data_dir.glob("candidates_*.jsonl"), key=lambda p: p.stat().st_mtime)
+    max_files = max(1, retention_days * 4)
+    while len(archives) > max_files:
+        oldest = archives.pop(0)
+        oldest.unlink(missing_ok=True)
+
+
+def save_candidate_if_needed(tenant_cfg: dict[str, Any], text: str, keyword: str, chat_id: int, message_id: int) -> bool:
+    storage = _storage_cfg(tenant_cfg)
+    if not storage["collect_candidates"]:
+        return False
+
+    sample_rate = min(1.0, max(0.0, storage["candidates_sample_rate"]))
+    if random.random() >= sample_rate:
+        return False
+
+    tenant_id = tenant_cfg["tenant_id"]
+    dedupe_hash = _candidate_hash(text)
+    if _is_candidate_duplicate(tenant_id, dedupe_hash, storage["candidates_dedupe_window_days"]):
+        return False
+
+    _rotate_candidates_if_needed(tenant_id, storage["candidates_max_mb"], storage["candidates_max_lines"])
+    append_jsonl(
+        BASE_DIR / "data" / tenant_id / "candidates.jsonl",
+        {
+            "tenant_id": tenant_id,
+            "text": text,
+            "label": None,
+            "keyword": keyword,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "hash": dedupe_hash,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "source": "telegram",
+        },
+    )
+    _cleanup_candidate_archives(tenant_id, storage["candidates_retention_days"])
+    return True
 
 
 def append_dataset_entry(entry: dict[str, Any]) -> None:
@@ -200,16 +336,28 @@ def import_choice_buttons(tenant_id: str):
 
 def format_settings(cfg: dict[str, Any]) -> str:
     context = cfg.get("context_filter", {})
+    storage = _storage_cfg(cfg)
+    routing = cfg.get("routing", {})
     return (
         f"tenant_id: {cfg.get('tenant_id')}\n"
         f"admins: {cfg.get('admins', [])}\n"
         f"chats: {cfg.get('chats', [])}\n"
+        f"chat_groups: {cfg.get('chat_groups', {})}\n"
+        f"chat_labels: {cfg.get('chat_labels', {})}\n"
         f"keywords: {cfg.get('keywords', [])}\n"
         f"context_filter.enabled: {context.get('enabled')}\n"
         f"model_path: {context.get('model_path')}\n"
         f"threshold_alert: {context.get('threshold_alert')}\n"
         f"threshold_drop: {context.get('threshold_drop')}\n"
-        f"collect_candidates: {context.get('collect_candidates')}"
+        f"collect_candidates: {storage.get('collect_candidates')}\n"
+        f"candidates_sample_rate: {storage.get('candidates_sample_rate')}\n"
+        f"candidates_max_mb: {storage.get('candidates_max_mb')}\n"
+        f"candidates_max_lines: {storage.get('candidates_max_lines')}\n"
+        f"candidates_retention_days: {storage.get('candidates_retention_days')}\n"
+        f"candidates_dedupe_window_days: {storage.get('candidates_dedupe_window_days')}\n"
+        f"routing.alert_chat_id: {routing.get('alert_chat_id')}\n"
+        f"routing.review_chat_id: {routing.get('review_chat_id')}\n"
+        f"routing.data_chat_id: {routing.get('data_chat_id')}"
     )
 
 
@@ -442,14 +590,16 @@ async def main() -> None:
                 return
 
             for tenant_id, tenant_cfg in tenants.items():
-                chats = {str(chat) for chat in tenant_cfg.get("chats", [])}
+                chats = {str(chat) for chat in get_tenant_chat_ids(tenant_cfg)}
                 if str(event.chat_id) not in chats:
                     continue
+
+                source_label = get_chat_label(tenant_cfg, int(event.chat_id))
 
                 lower = text.lower()
                 tenant_keywords = tenant_cfg.get("keywords", [])
                 print(
-                    f"[Pipeline] tenant={tenant_id} text='{text[:120]}' keywords={tenant_keywords}",
+                    f"[Pipeline] tenant={tenant_id} source_chat_id={event.chat_id} source_label={source_label} text='{text[:120]}' keywords={tenant_keywords}",
                     flush=True,
                 )
                 found_keyword = next((kw for kw in tenant_keywords if kw.lower() in lower), None)
@@ -463,13 +613,27 @@ async def main() -> None:
                 print(f"[Pipeline] tenant={tenant_id} decision={result.decision}", flush=True)
                 if result.decision == "DROP":
                     print(f"[Pipeline] tenant={tenant_id} drop chat_id={event.chat_id}", flush=True)
-                    save_candidate_if_needed(tenant_cfg, text, found_keyword, event.chat_id, event.message.id)
+                    was_saved = save_candidate_if_needed(tenant_cfg, text, found_keyword, event.chat_id, event.message.id)
+                    routing = tenant_cfg.get("routing", {})
+                    data_chat_id = routing.get("data_chat_id")
+                    if was_saved and data_chat_id:
+                        await bot_client.send_message(
+                            int(data_chat_id),
+                            (
+                                f"🗂 DROP candidate | tenant={tenant_id}\n"
+                                f"source_chat_id={event.chat_id}\n"
+                                f"source_label={source_label}\n"
+                                f"keyword={found_keyword}\n"
+                                f"text={text[:500]}"
+                            ),
+                        )
                     continue
 
                 decision_line = f"Relevance score: {result.score:.2f} | Decision: {result.decision}"
                 link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}" if str(event.chat_id).startswith("-100") else "(нет ссылки)"
                 body = (
                     f"🚨 Совпадение по tenant: {tenant_id}\n"
+                    f"Источник: chat_id={event.chat_id} label={source_label}\n"
                     f"Ключевое слово: {found_keyword}\n"
                     f"Сообщение: {text[:700]}\n"
                     f"{decision_line}\n"
@@ -487,12 +651,26 @@ async def main() -> None:
                 }
                 buttons = [[Button.inline("✅ Релевантно", f"lbl:{token}:1"), Button.inline("❌ Нерелевантно", f"lbl:{token}:0")]]
 
-                for admin_id in tenant_cfg.get("admins", []):
-                    await bot_client.send_message(admin_id, body, buttons=buttons)
+                routing = tenant_cfg.get("routing", {})
+                target_chat_id = None
+                if result.decision == "ALERT":
+                    target_chat_id = routing.get("alert_chat_id")
+                elif result.decision == "UNCERTAIN":
+                    target_chat_id = routing.get("review_chat_id")
+
+                if target_chat_id:
+                    await bot_client.send_message(int(target_chat_id), body, buttons=buttons)
                     print(
-                        f"[Pipeline] tenant={tenant_id} sent decision={result.decision} admin_id={admin_id} source_chat_id={event.chat_id}",
+                        f"[Pipeline] tenant={tenant_id} sent decision={result.decision} target_chat_id={target_chat_id} source_chat_id={event.chat_id}",
                         flush=True,
                     )
+                else:
+                    for admin_id in tenant_cfg.get("admins", []):
+                        await bot_client.send_message(admin_id, body, buttons=buttons)
+                        print(
+                            f"[Pipeline] tenant={tenant_id} sent decision={result.decision} admin_id={admin_id} source_chat_id={event.chat_id}",
+                            flush=True,
+                        )
 
         print("Бот запущен", flush=True)
         await bot_client.run_until_disconnected()
