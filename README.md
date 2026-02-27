@@ -1,97 +1,11 @@
-# Telegram Keyword Alert Bot
+# keyword-alert-bot_pro
 
-[![Docker](https://img.shields.io/badge/docker-ready-blue)](https://www.docker.com/)
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
-[![Telethon](https://img.shields.io/badge/library-telethon-orange)](https://github.com/LonamiWebs/Telethon)
-[![GitHub stars](https://img.shields.io/github/stars/Konstannttiinn1/keyword-alert-bot.svg?style=social)](https://github.com/Konstannttiinn1/keyword-alert-bot/stargazers)
+Multi-tenant Telegram-бот для мониторинга ключевых слов, локальной ML-фильтрации релевантности и дообучения на ваших метках.
 
----
+## 1) Конфигурация multi-tenant
 
-<details>
-<summary><strong>🇷🇺 Читать на русском</strong></summary>
-
-### 📌 Бот для отслеживания ключевых слов
-
-Бот для отслеживания ключевых слов в Telegram-группах и пересылки сообщений с совпадениями админам в личку. Поддерживает интерактивное управление через Telegram-интерфейс.
-
-#### 🚀 Возможности
-
-- 📥 Отслеживание ключевых слов в указанных чатах
-- 🧠 Поддержка добавления чатов по ссылке, юзернейму или ID
-- ⚙️ Управление через Telegram-интерфейс (кнопки и команды)
-- 📋 Меню управления словами и чатами
-- 🔄 Тест активности слежки по чатам
-- 📡 Поддержка нескольких администраторов
-- 📎 Уведомления содержат ссылку на сообщение, юзернейм автора и ID чата
-- 🧼 Удаление чатов и слов с подтверждением
-
-#### 🚀 Быстрый запуск (Docker)
-
-```bash
-git clone https://github.com/Konstannttiinn1/keyword-alert-bot.git
-cd keyword-alert-bot
-docker compose up --build -d
-```
-
-#### 📦 Конфигурация
-
-Создай или отредактируй `config.json`:
-```json
-{
-  "api_id": 123456,
-  "api_hash": "your_api_hash",
-  "session_name": "session",
-  "session_string": "",
-  "admin_ids": [123456789],
-  "keywords": [],
-  "chats": [],
-  "bot_token": "your_bot_token",
-  "usernames": {}
-}
-```
-
-#### 📲 Команды Telegram
-
-- `/start` — главное меню  
-- `/menu` — меню управления  
-- 🔑 Ключевые слова  
-- 💬 Мониторинг чатов
-
-#### 💡 Автор: [Константин](https://t.me/L_Konstantinn)
-
-</details>
-
----
-
-<details open>
-<summary><strong>🇬🇧 Read in English</strong></summary>
-
-### 📌 Keyword Alert Bot
-
-A Telegram bot that monitors messages in selected groups for specific keywords and forwards matching messages to admins via private messages. Features a full interactive Telegram-based management interface.
-
-#### 🚀 Features
-
-- 📥 Keyword tracking in selected chats
-- 🧠 Add chats by link, username, or ID
-- ⚙️ Telegram interface management (buttons + commands)
-- 📋 Keyword and chat management menus
-- 🔄 Monitoring test for selected chats
-- 📡 Multi-admin support
-- 📎 Notifications include message link, author username, and chat ID
-- 🧼 Safe deletion of words and chats with confirmation
-
-#### 🐳 Quick Start (Docker)
-
-```bash
-git clone https://github.com/Konstannttiinn1/keyword-alert-bot.git
-cd keyword-alert-bot
-docker compose up --build -d
-```
-
-#### 📦 Configuration
-
-Create or edit `config.json`:
+### Глобальная конфигурация
+Файл: `config/global.json`
 
 ```json
 {
@@ -99,21 +13,107 @@ Create or edit `config.json`:
   "api_hash": "your_api_hash",
   "session_name": "session",
   "session_string": "",
-  "admin_ids": [123456789],
-  "keywords": [],
-  "chats": [],
-  "bot_token": "your_bot_token",
-  "usernames": {}
+  "bot_token": "${BOT_TOKEN}",
+  "default_tenant": "demo"
 }
 ```
 
-#### 📲 Telegram Commands
+### Конфигурация тенанта
+Файл: `config/tenants/<tenant_id>.json`, пример `config/tenants/demo.json`.
 
-- `/start` — open main menu  
-- `/menu` — open management menu  
-- 🔑 Keywords  
-- 💬 Chat monitoring
+```json
+{
+  "tenant_id": "demo",
+  "admins": [8333432274],
+  "chats": [-10011111111, -10022222222],
+  "chat_groups": {
+    "project_main": [-10011111111, -10022222222]
+  },
+  "chat_labels": {
+    "-10011111111": "основной",
+    "-10022222222": "саппорт"
+  },
+  "keywords": ["vpn", "впн"],
+  "context_filter": {
+    "enabled": true,
+    "model_path": "models/demo/relevance.joblib",
+    "threshold_alert": 0.45,
+    "threshold_drop": 0.15,
+    "collect_candidates": true
+  },
+  "storage": {
+    "collect_candidates": true,
+    "candidates_sample_rate": 1.0,
+    "candidates_max_mb": 20,
+    "candidates_max_lines": 200000,
+    "candidates_retention_days": 14,
+    "candidates_dedupe_window_days": 7
+  },
+  "routing": {
+    "alert_chat_id": -10044444444,
+    "review_chat_id": -10055555555,
+    "data_chat_id": -10066666666
+  }
+}
+```
 
-#### 💡 Author: [Konstantin](https://t.me/L_Konstantinn)
+Ключевые моменты:
+- `chats` + все ID из `chat_groups` участвуют в tenant-match.
+- `chat_labels` используются в логах и алертах как метка под-чата.
+- `routing`:
+  - `alert_chat_id` — куда отправлять `ALERT`
+  - `review_chat_id` — куда отправлять `UNCERTAIN`
+  - `data_chat_id` — куда отправлять уведомление о сохранённом `DROP`-кандидате (опционально)
+- если `routing` не задан — отправка остаётся по `admins` (как раньше).
 
-</details>
+## 2) Где хранятся данные и модель
+
+Для каждого тенанта:
+- `data/<tenant_id>/dataset.jsonl` — размеченный датасет
+- `data/<tenant_id>/candidates.jsonl` — кандидаты из DROP
+- `data/<tenant_id>/candidates_YYYY-MM-DD_HHMMSS.jsonl` — ротированные архивы кандидатов
+- `models/<tenant_id>/relevance.joblib` — обученная модель
+- `models/<tenant_id>/metadata.json` — метрики и дата обучения
+
+## 3) Контроль роста candidates (sampling/dedupe/rotation)
+
+Для `DROP`-кандидатов доступны ограничения через `storage`:
+- `candidates_sample_rate` — случайная выборка 0..1 перед записью
+- `candidates_dedupe_window_days` — дедупликация одинакового нормализованного текста по hash
+- `candidates_max_mb` / `candidates_max_lines` — лимиты текущего файла
+- при превышении лимита выполняется ротация в `candidates_*.jsonl`
+- затем retention чистит старые архивы (`candidates_retention_days`)
+
+## 4) Импорт датасета (TXT/DOCX)
+
+```bash
+python import_dataset.py --tenant demo --relevant relevant.docx --not_relevant not_relevant.txt
+```
+
+- TXT: 1 строка = 1 сообщение
+- DOCX: берутся непустые абзацы
+- если строка начинается с `текст:`, сохраняется только часть после префикса
+
+## 5) Обучение ML-модели
+
+```bash
+python train_relevance_model.py --tenant demo
+```
+
+Что происходит:
+- загрузка `dataset.jsonl`
+- нормализация текста (lower, URL→`<URL>`, числа→`<NUM>`, нормализация пробелов)
+- pipeline: TF-IDF (word + char ngrams) + LogisticRegression
+- вывод метрик, включая **recall для label=1**
+- сохранение модели и `metadata.json`
+
+## 6) Запуск бота локально (Windows)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
+# Заполните BOT_TOKEN в .env, а также config/global.json
+python Keyword-alert.py
+```

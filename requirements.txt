@@ -1,1 +1,5 @@
 telethon
+scikit-learn
+joblib
+python-docx
+pytest

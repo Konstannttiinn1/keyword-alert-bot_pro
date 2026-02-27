@@ -1,0 +1,36 @@
+{
+  "tenant_id": "demo",
+  "admins": [8333432274],
+  "chats": [-10011111111, -10022222222],
+  "chat_groups": {
+    "project_main": [-10011111111, -10022222222],
+    "project_extra": [-10033333333]
+  },
+  "chat_labels": {
+    "-10011111111": "основной",
+    "-10022222222": "саппорт",
+    "-10033333333": "маркетинг"
+  },
+  "keywords": ["vpn", "впн"],
+  "context_filter": {
+    "enabled": true,
+    "model_path": "models/demo/relevance.joblib",
+    "threshold_alert": 0.45,
+    "threshold_drop": 0.15,
+    "collect_candidates": true
+  },
+  "storage": {
+    "collect_candidates": true,
+    "candidates_sample_rate": 1.0,
+    "candidates_max_mb": 20,
+    "candidates_max_lines": 200000,
+    "candidates_retention_days": 14,
+    "candidates_dedupe_window_days": 7
+  },
+  "routing": {
+    "alert_chat_id": -10044444444,
+    "review_chat_id": -10055555555,
+    "data_chat_id": -10066666666
+  },
+  "llm": { "enabled": false }
+}
