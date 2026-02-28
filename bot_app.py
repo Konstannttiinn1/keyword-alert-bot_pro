@@ -461,12 +461,17 @@ async def main() -> None:
     if not global_cfg.get("bot_token"):
         raise RuntimeError("Не задан bot_token")
 
-    session_string = global_cfg.get("session_string", "")
-    session_name = global_cfg.get("session_name", "user_session")
-    user_session = StringSession(session_string) if session_string else session_name
+    user_session_string = global_cfg.get("user_session_string") or global_cfg.get("session_string", "")
+    user_session_name = global_cfg.get("user_session_name") or global_cfg.get("session_name", "user.session")
+    bot_session_name = global_cfg.get("bot_session_name", "bot_session")
+
+    if not user_session_string and str(user_session_name) == str(bot_session_name):
+        raise RuntimeError("user_session_name и bot_session_name должны быть разными")
+
+    user_session = StringSession(user_session_string) if user_session_string else user_session_name
 
     user_client = TelegramClient(user_session, global_cfg["api_id"], global_cfg["api_hash"])
-    bot_client = TelegramClient("bot_session", global_cfg["api_id"], global_cfg["api_hash"])
+    bot_client = TelegramClient(bot_session_name, global_cfg["api_id"], global_cfg["api_hash"])
     model_cache: dict[str, RelevanceFilter] = {}
 
     def _format_account(me: Any) -> str:
@@ -475,13 +480,34 @@ async def main() -> None:
         return f"{username} (id={me.id}, first_name={first_name})"
 
     try:
+        await user_client.connect()
+        if not await user_client.is_user_authorized():
+            print("user_client требует логин (не авторизован)", flush=True)
+            print("Сохраните user_session_string в config/global.json и перезапустите бота.", flush=True)
+            raise RuntimeError("user_client не авторизован")
         await user_client.start()
+
         await bot_client.start(bot_token=global_cfg["bot_token"])
-        bot_me = await bot_client.get_me()
-        user_me = await user_client.get_me()
-        if not session_string:
-            print("Скопируйте session_string в config/global.json:")
-            print(user_client.session.save())
+
+        me_user = await user_client.get_me()
+        me_bot = await bot_client.get_me()
+        if me_user is None or me_bot is None:
+            raise RuntimeError("Не удалось получить данные аккаунтов user_client/bot_client")
+
+        user_phone = getattr(me_user, "phone", None) or "n/a"
+        print(f"user_client=@{getattr(me_user, 'username', None) or '(no username)'} id={me_user.id} phone={user_phone}", flush=True)
+        print(f"bot_client=@{getattr(me_bot, 'username', None) or '(no username)'} id={me_bot.id}", flush=True)
+
+        if getattr(me_user, "bot", False):
+            raise RuntimeError("Ошибка конфигурации: user_client авторизован как бот. Укажите user_session_string/user_session_name пользовательского аккаунта.")
+        if not getattr(me_bot, "bot", False):
+            raise RuntimeError("Ошибка конфигурации: bot_client должен быть авторизован как бот через bot_token.")
+
+        bot_me = me_bot
+        user_me = me_user
+        if not user_session_string:
+            print("Скопируйте user_session_string в config/global.json:", flush=True)
+            print(user_client.session.save(), flush=True)
 
         @bot_client.on(events.CallbackQuery)
         async def callback_handler(event):
@@ -650,10 +676,10 @@ async def main() -> None:
                     await event.respond("Доступ запрещён")
                     return
                 phone = getattr(user_me, "phone", None) or "n/a"
-                if session_string:
+                if user_session_string:
                     session_info = "session_string=present"
                 else:
-                    session_file = f"{session_name}.session" if not str(session_name).endswith(".session") else str(session_name)
+                    session_file = str(user_session_name)
                     session_info = f"session_name={session_file}"
                 await event.respond(
                     "\n".join(
