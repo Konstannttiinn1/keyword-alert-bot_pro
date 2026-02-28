@@ -26,6 +26,7 @@ CONFIG_LOCK = asyncio.Lock()
 LABEL_CONTEXT: dict[str, dict[str, Any]] = {}
 ADMIN_STATE: dict[int, dict[str, Any]] = {}
 SAVED_ALERT_IDS: set[str] = set()
+DEBUG_SOURCE = False
 
 
 @dataclass
@@ -468,9 +469,16 @@ async def main() -> None:
     bot_client = TelegramClient("bot_session", global_cfg["api_id"], global_cfg["api_hash"])
     model_cache: dict[str, RelevanceFilter] = {}
 
+    def _format_account(me: Any) -> str:
+        username = f"@{me.username}" if getattr(me, "username", None) else "(no username)"
+        first_name = getattr(me, "first_name", None) or ""
+        return f"{username} (id={me.id}, first_name={first_name})"
+
     try:
         await user_client.start()
         await bot_client.start(bot_token=global_cfg["bot_token"])
+        bot_me = await bot_client.get_me()
+        user_me = await user_client.get_me()
         if not session_string:
             print("Скопируйте session_string в config/global.json:")
             print(user_client.session.save())
@@ -637,6 +645,47 @@ async def main() -> None:
                 await event.respond("Меню управления:", buttons=admin_menu_buttons(matched_tenant))
                 return
 
+            if event.raw_text and event.raw_text.strip().startswith("/whoami"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                phone = getattr(user_me, "phone", None) or "n/a"
+                if session_string:
+                    session_info = "session_string=present"
+                else:
+                    session_file = f"{session_name}.session" if not str(session_name).endswith(".session") else str(session_name)
+                    session_info = f"session_name={session_file}"
+                await event.respond(
+                    "\n".join(
+                        [
+                            f"bot_client: {_format_account(bot_me)}",
+                            f"user_client: {_format_account(user_me)}, phone={phone}",
+                            f"session: {session_info}",
+                            f"default_tenant: {global_cfg.get('default_tenant')}",
+                        ]
+                    )
+                )
+                return
+
+            if event.raw_text and event.raw_text.strip().startswith("/debug_source"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                global DEBUG_SOURCE
+                parts = event.raw_text.strip().split(maxsplit=1)
+                action = (parts[1].strip().lower() if len(parts) > 1 else "status")
+                if action == "on":
+                    DEBUG_SOURCE = True
+                    await event.respond("debug_source: ON")
+                elif action == "off":
+                    DEBUG_SOURCE = False
+                    await event.respond("debug_source: OFF")
+                elif action == "status":
+                    await event.respond(f"debug_source: {'ON' if DEBUG_SOURCE else 'OFF'}")
+                else:
+                    await event.respond("Использование: /debug_source on|off|status")
+                return
+
             if event.raw_text and event.raw_text.strip().startswith("/bind"):
                 parts = event.raw_text.strip().split()
                 state = ADMIN_STATE.get(sender.id)
@@ -748,6 +797,17 @@ async def main() -> None:
                     ADMIN_STATE.pop(sender.id, None)
                     await event.respond(f"Импортировано примеров: {count}")
                     return
+
+        @user_client.on(events.NewMessage(incoming=True))
+        async def source_raw_debug_handler(event):
+            if not DEBUG_SOURCE:
+                return
+            raw_text = (event.raw_text or "").replace("\n", " ").strip()
+            short_text = raw_text[:50]
+            print(
+                f"[SourceRaw] chat_id={event.chat_id} is_private={event.is_private} sender={getattr(event, 'sender_id', None)} text={short_text}",
+                flush=True,
+            )
 
         @user_client.on(events.NewMessage())
         async def source_message_handler(event):
