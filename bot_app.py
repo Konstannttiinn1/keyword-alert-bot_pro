@@ -404,6 +404,11 @@ async def send_with_routing(bot_client: TelegramClient, routing: dict[str, Any],
         return False
 
     thread_id = routing.get(thread_key)
+    decision_kind = {"alert": "ALERT", "review": "UNCERTAIN", "data": "DROP"}.get(kind, kind.upper())
+    print(
+        f"[Notify] kind={decision_kind} target_chat_id={chat_id} thread_id={thread_id} (via bot_client)",
+        flush=True,
+    )
     if thread_id:
         await bot_client.send_message(int(chat_id), text, buttons=buttons, reply_to=int(thread_id))
     else:
@@ -450,19 +455,25 @@ async def save_tenant_cfg(cfg: dict[str, Any]) -> None:
 
 async def main() -> None:
     global_cfg = load_global_config()
+    if not global_cfg.get("api_id") or not global_cfg.get("api_hash"):
+        raise RuntimeError("Не заданы api_id/api_hash")
     if not global_cfg.get("bot_token"):
-        raise RuntimeError("Не задан BOT_TOKEN")
+        raise RuntimeError("Не задан bot_token")
 
     session_string = global_cfg.get("session_string", "")
-    string_session = StringSession(session_string) if session_string else StringSession()
-    bot_client = TelegramClient(string_session, global_cfg["api_id"], global_cfg["api_hash"])
+    session_name = global_cfg.get("session_name", "user_session")
+    user_session = StringSession(session_string) if session_string else session_name
+
+    user_client = TelegramClient(user_session, global_cfg["api_id"], global_cfg["api_hash"])
+    bot_client = TelegramClient("bot_session", global_cfg["api_id"], global_cfg["api_hash"])
     model_cache: dict[str, RelevanceFilter] = {}
 
     try:
+        await user_client.start()
         await bot_client.start(bot_token=global_cfg["bot_token"])
         if not session_string:
             print("Скопируйте session_string в config/global.json:")
-            print(bot_client.session.save())
+            print(user_client.session.save())
 
         @bot_client.on(events.CallbackQuery)
         async def callback_handler(event):
@@ -610,14 +621,14 @@ async def main() -> None:
                 return
 
         @bot_client.on(events.NewMessage())
-        async def new_message_handler(event):
+        async def admin_message_handler(event):
             sender = await event.get_sender()
             chat_id = event.chat_id
             is_private = bool(event.is_private)
             tenants = load_tenants_with_paths()
             default_tenant = global_cfg.get("default_tenant")
             matched_tenant = resolve_tenant_for_admin(sender.id, tenants, default_tenant)
-            print(f"[NewMessage] chat_id={chat_id} is_private={is_private} tenant_match={matched_tenant}", flush=True)
+            print(f"[NewMessage] chat_id={chat_id} is_private={is_private} tenant_match={matched_tenant} (via bot_client)", flush=True)
 
             if is_private and event.raw_text and event.raw_text.strip().startswith("/start"):
                 if not matched_tenant:
@@ -738,16 +749,19 @@ async def main() -> None:
                     await event.respond(f"Импортировано примеров: {count}")
                     return
 
-            # Текущая логика алертов (не изменяем по смыслу)
+        @user_client.on(events.NewMessage())
+        async def source_message_handler(event):
             text = event.message.message or ""
             if not text:
                 return
 
-            for tenant_id, tenant_cfg in tenants.items():
-                chats = {str(chat) for chat in get_tenant_chat_ids(tenant_cfg)}
-                if str(event.chat_id) not in chats:
-                    continue
+            tenants = load_tenants_with_paths()
+            matched_tenants = [tenant_id for tenant_id, tenant_cfg in tenants.items() if str(event.chat_id) in {str(chat) for chat in get_tenant_chat_ids(tenant_cfg)}]
+            tenant_match = ",".join(matched_tenants) if matched_tenants else "None"
+            print(f"[SourceMessage] chat_id={event.chat_id} tenant_match={tenant_match} (via user_client)", flush=True)
 
+            for tenant_id in matched_tenants:
+                tenant_cfg = tenants[tenant_id]
                 source_label = get_chat_label(tenant_cfg, int(event.chat_id))
 
                 lower = text.lower()
@@ -823,10 +837,10 @@ async def main() -> None:
                             f"[Pipeline] tenant={tenant_id} sent decision={result.decision} admin_id={admin_id} source_chat_id={event.chat_id}",
                             flush=True,
                         )
-
-        print("Бот запущен", flush=True)
-        await bot_client.run_until_disconnected()
+        print("Бот запущен (user_client + bot_client)", flush=True)
+        await asyncio.gather(user_client.run_until_disconnected(), bot_client.run_until_disconnected())
     finally:
+        await user_client.disconnect()
         await bot_client.disconnect()
 
 
