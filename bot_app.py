@@ -379,14 +379,20 @@ def clear_routing(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def extract_thread_id(message: Any) -> int | None:
+    top_direct = getattr(message, "reply_to_top_id", None)
+    if top_direct:
+        return int(top_direct)
+
     reply_to = getattr(message, "reply_to", None)
     if reply_to is not None:
         top_id = getattr(reply_to, "reply_to_top_id", None)
         if top_id:
             return int(top_id)
-    top_direct = getattr(message, "reply_to_top_id", None)
-    if top_direct:
-        return int(top_direct)
+
+        reply_msg_id = getattr(reply_to, "reply_to_msg_id", None)
+        if reply_msg_id:
+            return int(reply_msg_id)
+
     return None
 
 
@@ -550,7 +556,12 @@ async def main() -> None:
                 return
 
             if data.startswith("adm:bind_route:"):
-                _, _, _, t_id, route_kind = data.split(":", 4)
+                parts = data.split(":")
+                if len(parts) != 4:
+                    await event.answer("Некорректный формат", alert=True)
+                    return
+                t_id = parts[2]
+                route_kind = parts[3]
                 ADMIN_STATE[sender.id] = {
                     "action": "await_bind_route",
                     "tenant_id": t_id,
@@ -639,6 +650,16 @@ async def main() -> None:
                     return
 
                 thread_id = extract_thread_id(event.message)
+                if thread_id is None:
+                    reply_to = getattr(event.message, "reply_to", None)
+                    print(
+                        "[BindDebug] reply_to_top_id="
+                        f"{getattr(event.message, 'reply_to_top_id', None)} "
+                        f"has_reply_to={reply_to is not None} "
+                        f"reply_to.reply_to_top_id={getattr(reply_to, 'reply_to_top_id', None) if reply_to else None} "
+                        f"reply_to.reply_to_msg_id={getattr(reply_to, 'reply_to_msg_id', None) if reply_to else None}",
+                        flush=True,
+                    )
                 apply_route_bind(cfg, route_kind, int(event.chat_id), thread_id)
                 await save_tenant_cfg(cfg)
                 if state and state.get("action") == "await_bind_route":
