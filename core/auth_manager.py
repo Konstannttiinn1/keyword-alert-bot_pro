@@ -103,7 +103,7 @@ def _print_ascii_qr(url: str) -> None:
 async def _sign_in_with_2fa(auth_client: TelegramClient) -> bool:
     for attempt in range(1, 4):
         print("[2FA] Запрос пароля...", flush=True)
-        password = getpass("Введите пароль 2FA: ")
+        password = await asyncio.to_thread(getpass, "Введите пароль 2FA: ")
         print("[2FA] Пароль введен, отправляю...", flush=True)
         try:
             await auth_client.sign_in(password=password)
@@ -120,6 +120,9 @@ async def _sign_in_with_2fa(auth_client: TelegramClient) -> bool:
         except PasswordTooFreshError:
             print("Пароль 2FA слишком свежий. Подождите и попробуйте снова.", flush=True)
             return False
+        except TimeoutError:
+            print("Таймаут при проверке пароля 2FA. Попробуйте снова.", flush=True)
+            continue
         except Exception:
             print("Ошибка при проверке пароля 2FA.", flush=True)
             return False
@@ -214,9 +217,13 @@ async def _authorize_via_code(api_id: int, api_hash: str, phone_from_cfg: str | 
     try:
         await auth_client.connect()
         sent = await auth_client.send_code_request(phone)
+        phone_code_hash = getattr(sent, "phone_code_hash", None)
+        if not phone_code_hash:
+            print("Не удалось получить phone_code_hash. Повторите попытку авторизации.", flush=True)
+            return None
         code = input("Введите код из Telegram: ").strip()
         try:
-            await auth_client.sign_in(phone=phone, code=code, phone_code_hash=sent.phone_code_hash)
+            await auth_client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
             authorized = await auth_client.is_user_authorized()
             print(f"[2FA] is_user_authorized: {authorized}", flush=True)
             if not authorized:
