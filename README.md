@@ -10,10 +10,11 @@ Multi-tenant Telegram-бот для мониторинга ключевых сл
 ```json
 {
   "api_id": 123456,
-  "api_hash": "your_api_hash",
-  "session_name": "session",
-  "session_string": "",
+  "api_hash": "0123456789abcdef0123456789abcdef",
   "bot_token": "${BOT_TOKEN}",
+  "user_session_string": "",
+  "user_session_name": "user.session",
+  "bot_session_name": "bot_session",
   "default_tenant": "demo"
 }
 ```
@@ -70,6 +71,11 @@ Multi-tenant Telegram-бот для мониторинга ключевых сл
   - `alert_thread_id` / `review_thread_id` / `data_thread_id` — ID темы (topic), отправка через `reply_to`
 - если `routing` не задан — отправка остаётся по `admins` (как раньше).
 
+
+### Важно
+- `config/global.json` — единственный глобальный конфиг проекта.
+- `config/tenants/*.json` — tenant-конфиги.
+- `config.json` больше не используется (если файл остался в корне — удалите его).
 ## 1.1) Привязка routing к темам через кнопки
 
 - В личке бота откройте `/start` → `🧭 routing`.
@@ -130,3 +136,61 @@ copy .env.example .env
 # Заполните BOT_TOKEN в .env, а также config/global.json
 python Keyword-alert.py
 ```
+
+## 7) Telegram API конфиг (единый источник)
+
+Рекомендуемый и основной источник: `config/global.json`.
+
+```json
+{
+  "api_id": 123456,
+  "api_hash": "0123456789abcdef0123456789abcdef",
+  "user_session_string": "",
+  "bot_token": "${BOT_TOKEN}"
+}
+```
+
+Для auth-утилит также поддерживаются переменные окружения:
+- `TG_API_ID`
+- `TG_API_HASH`
+- `TG_PHONE` (для app-кода)
+
+Порядок загрузки во всех auth-скриптах: **ENV/.env → config/global.json**. `config.json` больше не используется.
+
+## 8) Получить `user_session_string` через QR
+
+```bash
+python tools/auth_user_client_qr.py --timeout 300
+```
+
+Полезные опции:
+- `--timeout 300` — время ожидания подтверждения QR (сек)
+- `--loop` — при таймауте автоматически перевыпускает QR и ждёт снова
+
+Если видите таймаут/не приходит подтверждение:
+- обновите Telegram до актуальной версии,
+- откройте Telegram на телефоне,
+- сканируйте QR через **Settings → Devices**.
+
+Скрипт выводит `qr.url`, а после успешного входа:
+
+```text
+USER_SESSION_STRING=<...>
+```
+
+## 9) Получить `user_session_string` через app-код
+
+```bash
+python tools/auth_user_client_code.py
+```
+
+Скрипт отправляет код один раз (`send_code_request`), просит app-код и при необходимости пароль 2FA,
+после чего печатает:
+
+```text
+USER_SESSION_STRING=<...>
+```
+
+## 10) Куда вставлять строку
+
+Вставьте значение в `config/global.json` в поле `user_session_string` и перезапустите процесс бота.
