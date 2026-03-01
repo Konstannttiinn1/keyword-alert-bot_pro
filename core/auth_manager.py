@@ -83,10 +83,30 @@ async def _authorize_via_qr(api_id: int, api_hash: str, timeout: int = 600) -> s
 
 async def _authorize_via_code(api_id: int, api_hash: str, phone_from_cfg: str | None) -> str | None:
     auth_client = TelegramClient(StringSession(), api_id, api_hash)
-    phone = _normalize_phone(phone_from_cfg or input("Введите номер телефона (+7...): ").strip())
+
+    default_phone = _normalize_phone(phone_from_cfg) if phone_from_cfg else ""
+    prompt = "Введите номер телефона (+7...)"
+    if default_phone:
+        prompt += f" [Enter = {default_phone}]"
+    prompt += ": "
+
+    raw_user_input = input(prompt).strip()
+    user_phone = _normalize_phone(raw_user_input) if raw_user_input else ""
+
+    if user_phone:
+        phone = user_phone
+        source = "user_input"
+        if default_phone and user_phone != default_phone:
+            print("TG_PHONE игнорируется, используем введённый номер", flush=True)
+    else:
+        phone = default_phone
+        source = "env_default"
+
     if not phone:
         print("Телефон не задан. Отмена авторизации.", flush=True)
         return None
+
+    print(f"Using phone={phone} source={source}", flush=True)
 
     try:
         await auth_client.connect()
