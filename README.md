@@ -130,3 +130,36 @@ copy .env.example .env
 # Заполните BOT_TOKEN в .env, а также config/global.json
 python Keyword-alert.py
 ```
+
+## 7) Получить `user_session_string` через QR
+
+```bash
+python tools/auth_user_client_qr.py
+```
+
+Скрипт берет `TG_API_ID`/`TG_API_HASH` из окружения (или `api_id`/`api_hash` из `config/global.json`),
+печатает `qr.url`, после подтверждения входа выводит:
+
+```text
+USER_SESSION_STRING=<...>
+```
+
+Вставьте значение в `config/global.json` в поле `user_session_string` (или передавайте через env по вашей схеме).
+
+## 8) Получить `user_session_string` через app-код
+
+```bash
+python tools/auth_user_client_code.py
+```
+
+Скрипт использует:
+- `TG_API_ID`, `TG_API_HASH`, `TG_PHONE` из env,
+- либо fallback к `api_id`/`api_hash` из `config/global.json` (и спросит `TG_PHONE`, если не задан).
+
+После ввода кода (и пароля 2FA при необходимости) выводится:
+
+```text
+USER_SESSION_STRING=<...>
+```
+
+Вставьте значение в `config/global.json` в поле `user_session_string`.
