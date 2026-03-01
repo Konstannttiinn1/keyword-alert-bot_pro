@@ -9,14 +9,12 @@ from telethon.errors import (
 )
 from telethon.sessions import StringSession
 
-from core.config_loader import load_telegram_credentials, normalize_phone
+from core.config_loader import load_telegram_credentials
 
 
 async def main() -> None:
-    creds = load_telegram_credentials(require_phone=False)
+    creds = load_telegram_credentials(require_phone=True)
     phone = creds.phone
-    if not phone:
-        phone = normalize_phone(input("Введите TG_PHONE (+7...): ").strip())
 
     client = TelegramClient(StringSession(), creds.api_id, creds.api_hash)
 

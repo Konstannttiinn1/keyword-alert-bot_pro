@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from filters.relevance import RelevanceFilter, normalize_text
 from import_dataset import import_file_to_dataset
 from train_relevance_model import train_for_tenant
+from core.auth_manager import ensure_user_authorized
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = BASE_DIR / "config"
@@ -508,10 +509,24 @@ async def main() -> None:
 
         await user_client.connect()
         if not await user_client.is_user_authorized():
-            print("⚠ user_client не авторизован — мониторинг выключен, UI работает", flush=True)
-            print("Сохраните user_session_string в config/global.json и перезапустите бота.", flush=True)
+            session_string = await ensure_user_authorized(
+                int(global_cfg["api_id"]),
+                str(global_cfg["api_hash"]),
+                global_cfg,
+                GLOBAL_CONFIG_PATH,
+            )
+            if session_string:
+                user_session_string = session_string
+                await user_client.disconnect()
+                user_client = TelegramClient(StringSession(user_session_string), global_cfg["api_id"], global_cfg["api_hash"])
+                await user_client.connect()
+                await user_client.start()
+            else:
+                print("⚠ user_client не авторизован — мониторинг выключен, UI работает", flush=True)
         else:
             await user_client.start()
+
+        if user_client.is_connected() and await user_client.is_user_authorized():
             user_me = await user_client.get_me()
             if user_me is None:
                 raise RuntimeError("Не удалось получить данные user_client")
