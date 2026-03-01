@@ -1,8 +1,10 @@
 import argparse
 import asyncio
+from getpass import getpass
 from pathlib import Path
 
 from telethon import TelegramClient
+from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
 from telethon.sessions import StringSession
 
 from core.config_loader import BASE_DIR, load_telegram_credentials
@@ -32,6 +34,18 @@ def _save_qr_if_available(url: str, out_path: Path) -> None:
     print(f"QR PNG сохранён: {out_path}", flush=True)
 
 
+async def _handle_2fa(client: TelegramClient) -> bool:
+    for attempt in range(1, 4):
+        password = getpass("Введите пароль 2FA: ")
+        try:
+            await client.sign_in(password=password)
+            return True
+        except PasswordHashInvalidError:
+            print(f"Неверный пароль 2FA (попытка {attempt}/3)", flush=True)
+    print("Достигнут лимит попыток пароля 2FA.", flush=True)
+    return False
+
+
 async def _run_qr_flow(client: TelegramClient, timeout: int, out_path: Path) -> bool:
     qr = await client.qr_login()
     print("QR login URL:")
@@ -44,6 +58,9 @@ async def _run_qr_flow(client: TelegramClient, timeout: int, out_path: Path) -> 
     try:
         await qr.wait(timeout=timeout)
         return True
+    except SessionPasswordNeededError:
+        print("Для завершения входа требуется пароль 2FA.", flush=True)
+        return await _handle_2fa(client)
     except asyncio.TimeoutError:
         print(
             "Таймаут ожидания QR. Подсказка: обновите Telegram, откройте на телефоне или сканируйте QR через Settings→Devices.",

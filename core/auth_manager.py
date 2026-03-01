@@ -1,14 +1,22 @@
 import asyncio
 import json
 import os
+import re
+from getpass import getpass
 from pathlib import Path
 from typing import Any
 
 from telethon import TelegramClient
-from getpass import getpass
-
-from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
+from telethon.errors import (
+    ApiIdInvalidError,
+    FloodWaitError,
+    PasswordHashInvalidError,
+    PhoneNumberInvalidError,
+    SessionPasswordNeededError,
+)
 from telethon.sessions import StringSession
+
+PHONE_RE = re.compile(r"^\+[0-9]{8,15}$")
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -19,10 +27,27 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _normalize_phone(raw: str) -> str:
-    clean = raw.strip().replace(" ", "").replace("(", "").replace(")", "").replace("-", "")
-    if clean and not clean.startswith("+"):
-        clean = "+" + clean
-    return clean
+    compact = re.sub(r"[\s\-()]", "", (raw or "").strip())
+    if not compact:
+        return ""
+    if compact.startswith("+"):
+        digits = re.sub(r"\D", "", compact[1:])
+        return f"+{digits}" if digits else ""
+
+    digits = re.sub(r"\D", "", compact)
+    if not digits:
+        return ""
+    if len(digits) == 11 and digits.startswith("8"):
+        return f"+7{digits[1:]}"
+    if len(digits) == 11 and digits.startswith("7"):
+        return f"+{digits}"
+    if len(digits) == 10:
+        return f"+7{digits}"
+    return f"+{digits}"
+
+
+def _is_valid_phone(phone: str) -> bool:
+    return bool(PHONE_RE.fullmatch(phone))
 
 
 def _save_user_session_string(global_cfg: dict[str, Any], global_config_path: Path, session_string: str) -> None:
@@ -61,10 +86,6 @@ def _save_qr_png(url: str, out_path: Path) -> None:
 def _print_ascii_qr(url: str) -> None:
     try:
         import qrcode  # type: ignore
-    except ImportError:
-        return
-
-    try:
         qr_obj = qrcode.QRCode(border=1)
         qr_obj.add_data(url)
         qr_obj.make(fit=True)
@@ -72,6 +93,21 @@ def _print_ascii_qr(url: str) -> None:
         qr_obj.print_ascii(invert=True)
     except Exception:
         return
+
+
+async def _sign_in_with_2fa(auth_client: TelegramClient) -> bool:
+    for attempt in range(1, 4):
+        password = getpass("Введите пароль 2FA: ")
+        try:
+            await auth_client.sign_in(password=password)
+            return True
+        except PasswordHashInvalidError:
+            print(f"Неверный пароль 2FA (попытка {attempt}/3)", flush=True)
+        except Exception:
+            print("Ошибка при проверке пароля 2FA.", flush=True)
+            return False
+    print("Достигнут лимит попыток пароля 2FA.", flush=True)
+    return False
 
 
 async def _authorize_via_qr(api_id: int, api_hash: str, timeout: int = 600) -> str | None:
@@ -92,52 +128,52 @@ async def _authorize_via_qr(api_id: int, api_hash: str, timeout: int = 600) -> s
                 return auth_client.session.save()
             except SessionPasswordNeededError:
                 print("Для завершения QR входа требуется пароль 2FA.", flush=True)
-                for attempt in range(1, 4):
-                    password = getpass("Введите пароль 2FA: ")
-                    try:
-                        await auth_client.sign_in(password=password)
-                        return auth_client.session.save()
-                    except PasswordHashInvalidError:
-                        print(f"Неверный пароль 2FA (попытка {attempt}/3)", flush=True)
-                    except Exception as exc:
-                        print(f"Ошибка 2FA: {type(exc).__name__}: {exc}", flush=True)
-                        return None
-                print("Достигнут лимит попыток пароля 2FA.", flush=True)
-                return None
+                ok = await _sign_in_with_2fa(auth_client)
+                return auth_client.session.save() if ok else None
             except asyncio.TimeoutError:
                 print("QR токен истёк. Пересоздаю QR...", flush=True)
                 continue
-    except Exception as exc:
-        print(f"Ошибка QR авторизации: {type(exc).__name__}: {exc}", flush=True)
-        return None
+    except FloodWaitError as exc:
+        print(f"Слишком много попыток. Подождите {exc.seconds} секунд.", flush=True)
+    except ApiIdInvalidError:
+        print("Некорректные API_ID/API_HASH. Получите их на my.telegram.org и обновите config/global.json.", flush=True)
+    except Exception:
+        print("Ошибка QR авторизации.", flush=True)
     finally:
         await auth_client.disconnect()
+    return None
 
 
 async def _authorize_via_code(api_id: int, api_hash: str, phone_from_cfg: str | None) -> str | None:
     auth_client = TelegramClient(StringSession(), api_id, api_hash)
 
     default_phone = _normalize_phone(phone_from_cfg) if phone_from_cfg else ""
-    prompt = "Введите номер телефона (+7...)"
-    if default_phone:
-        prompt += f" [Enter = {default_phone}]"
-    prompt += ": "
+    while True:
+        prompt = "Введите номер телефона (+7...)"
+        if default_phone:
+            prompt += f" [Enter = {default_phone}]"
+        prompt += ": "
 
-    raw_user_input = input(prompt).strip()
-    user_phone = _normalize_phone(raw_user_input) if raw_user_input else ""
+        raw_user_input = input(prompt).strip()
+        user_phone = _normalize_phone(raw_user_input) if raw_user_input else ""
 
-    if user_phone:
-        phone = user_phone
-        source = "user_input"
-        if default_phone and user_phone != default_phone:
-            print("TG_PHONE игнорируется, используем введённый номер", flush=True)
-    else:
-        phone = default_phone
-        source = "env_default"
+        if user_phone:
+            phone = user_phone
+            source = "user_input"
+            if default_phone and user_phone != default_phone:
+                print("TG_PHONE игнорируется, используем введённый номер", flush=True)
+        else:
+            phone = default_phone
+            source = "default"
 
-    if not phone:
-        print("Телефон не задан. Отмена авторизации.", flush=True)
-        return None
+        if not phone:
+            print("Телефон не задан. Отмена авторизации.", flush=True)
+            return None
+
+        if not _is_valid_phone(phone):
+            print("Некорректный номер. Поддержка форматов: 8XXX, +7XXX, +7 XXX XXX-XX-XX", flush=True)
+            continue
+        break
 
     print(f"Using phone={phone} source={source}", flush=True)
 
@@ -148,22 +184,23 @@ async def _authorize_via_code(api_id: int, api_hash: str, phone_from_cfg: str | 
         try:
             await auth_client.sign_in(phone=phone, code=code, phone_code_hash=sent.phone_code_hash)
         except SessionPasswordNeededError:
-            for attempt in range(1, 4):
-                password = getpass("Введите пароль 2FA: ")
-                try:
-                    await auth_client.sign_in(password=password)
-                    break
-                except PasswordHashInvalidError:
-                    print(f"Неверный пароль 2FA (попытка {attempt}/3)", flush=True)
-                    if attempt == 3:
-                        print("Достигнут лимит попыток пароля 2FA.", flush=True)
-                        return None
+            print("Требуется пароль 2FA.", flush=True)
+            ok = await _sign_in_with_2fa(auth_client)
+            if not ok:
+                return None
+
         return auth_client.session.save()
-    except Exception as exc:
-        print(f"Ошибка авторизации по коду: {type(exc).__name__}: {exc}", flush=True)
-        return None
+    except FloodWaitError as exc:
+        print(f"Слишком много попыток. Подождите {exc.seconds} секунд.", flush=True)
+    except PhoneNumberInvalidError:
+        print("Некорректный номер телефона. Запустите авторизацию ещё раз и введите номер заново.", flush=True)
+    except ApiIdInvalidError:
+        print("Некорректные API_ID/API_HASH. Получите их на my.telegram.org и обновите config/global.json.", flush=True)
+    except Exception:
+        print("Ошибка авторизации по коду.", flush=True)
     finally:
         await auth_client.disconnect()
+    return None
 
 
 async def ensure_user_authorized(api_id: int, api_hash: str, global_cfg: dict[str, Any], global_config_path: Path) -> str | None:

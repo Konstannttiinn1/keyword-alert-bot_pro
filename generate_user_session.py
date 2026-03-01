@@ -1,9 +1,11 @@
 import asyncio
+from getpass import getpass
 
 from telethon import TelegramClient
 from telethon.errors import (
     ApiIdInvalidError,
     FloodWaitError,
+    PasswordHashInvalidError,
     PhoneCodeInvalidError,
     PhoneNumberInvalidError,
     SessionPasswordNeededError,
@@ -18,6 +20,18 @@ def _describe_code_delivery(sent) -> str:
     next_type = getattr(sent, "next_type", None)
     timeout = getattr(sent, "timeout", None)
     return f"sent.type={sent_type} | sent.next_type={next_type} | sent.timeout={timeout}"
+
+
+async def _handle_2fa(client: TelegramClient) -> bool:
+    for attempt in range(1, 4):
+        password = getpass("Введите пароль 2FA: ")
+        try:
+            await client.sign_in(password=password)
+            return True
+        except PasswordHashInvalidError:
+            print(f"Неверный пароль 2FA (попытка {attempt}/3)", flush=True)
+    print("Достигнут лимит попыток пароля 2FA.", flush=True)
+    return False
 
 
 async def main() -> None:
@@ -47,14 +61,16 @@ async def main() -> None:
                 continue
 
             try:
-                await client.sign_in(phone=phone, code=code)
+                await client.sign_in(phone=phone, code=code, phone_code_hash=sent.phone_code_hash)
                 break
             except PhoneCodeInvalidError:
                 print("Неверный код. Попробуйте снова.", flush=True)
                 continue
             except SessionPasswordNeededError:
-                password = input("Включена 2FA. Введите пароль: ").strip()
-                await client.sign_in(password=password)
+                print("Требуется пароль 2FA.", flush=True)
+                ok = await _handle_2fa(client)
+                if not ok:
+                    return
                 break
 
         print("\nUSER_SESSION_STRING:")
@@ -67,8 +83,8 @@ async def main() -> None:
         print("Некорректный номер телефона (PhoneNumberInvalidError)", flush=True)
     except ApiIdInvalidError:
         print("Некорректные API_ID/API_HASH (ApiIdInvalidError)", flush=True)
-    except Exception as exc:
-        print(f"Неожиданная ошибка: {type(exc).__name__}: {exc}", flush=True)
+    except Exception:
+        print("Неожиданная ошибка авторизации.", flush=True)
     finally:
         await client.disconnect()
 
