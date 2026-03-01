@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
+from getpass import getpass
+
+from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
 from telethon.sessions import StringSession
 
 
@@ -56,9 +58,25 @@ def _save_qr_png(url: str, out_path: Path) -> None:
             pass
 
 
+def _print_ascii_qr(url: str) -> None:
+    try:
+        import qrcode  # type: ignore
+    except ImportError:
+        return
+
+    try:
+        qr_obj = qrcode.QRCode(border=1)
+        qr_obj.add_data(url)
+        qr_obj.make(fit=True)
+        print("ASCII QR:", flush=True)
+        qr_obj.print_ascii(invert=True)
+    except Exception:
+        return
+
+
 async def _authorize_via_qr(api_id: int, api_hash: str, timeout: int = 600) -> str | None:
     auth_client = TelegramClient(StringSession(), api_id, api_hash)
-    out_path = Path.cwd() / "qr_login.png"
+    out_path = Path.cwd() / "data" / "auth" / "qr_login.png"
     try:
         await auth_client.connect()
         while True:
@@ -66,11 +84,26 @@ async def _authorize_via_qr(api_id: int, api_hash: str, timeout: int = 600) -> s
             print("QR login URL:", flush=True)
             print(qr.url, flush=True)
             _save_qr_png(qr.url, out_path)
+            _print_ascii_qr(qr.url)
             print("Откройте Telegram на телефоне:", flush=True)
             print("Настройки → Устройства → Сканировать QR", flush=True)
             try:
                 await qr.wait(timeout=timeout)
                 return auth_client.session.save()
+            except SessionPasswordNeededError:
+                print("Для завершения QR входа требуется пароль 2FA.", flush=True)
+                for attempt in range(1, 4):
+                    password = getpass("Введите пароль 2FA: ")
+                    try:
+                        await auth_client.sign_in(password=password)
+                        return auth_client.session.save()
+                    except PasswordHashInvalidError:
+                        print(f"Неверный пароль 2FA (попытка {attempt}/3)", flush=True)
+                    except Exception as exc:
+                        print(f"Ошибка 2FA: {type(exc).__name__}: {exc}", flush=True)
+                        return None
+                print("Достигнут лимит попыток пароля 2FA.", flush=True)
+                return None
             except asyncio.TimeoutError:
                 print("QR токен истёк. Пересоздаю QR...", flush=True)
                 continue
@@ -115,8 +148,16 @@ async def _authorize_via_code(api_id: int, api_hash: str, phone_from_cfg: str | 
         try:
             await auth_client.sign_in(phone=phone, code=code, phone_code_hash=sent.phone_code_hash)
         except SessionPasswordNeededError:
-            password = input("Включен 2FA. Введите пароль: ").strip()
-            await auth_client.sign_in(password=password)
+            for attempt in range(1, 4):
+                password = getpass("Введите пароль 2FA: ")
+                try:
+                    await auth_client.sign_in(password=password)
+                    break
+                except PasswordHashInvalidError:
+                    print(f"Неверный пароль 2FA (попытка {attempt}/3)", flush=True)
+                    if attempt == 3:
+                        print("Достигнут лимит попыток пароля 2FA.", flush=True)
+                        return None
         return auth_client.session.save()
     except Exception as exc:
         print(f"Ошибка авторизации по коду: {type(exc).__name__}: {exc}", flush=True)
@@ -146,6 +187,5 @@ async def ensure_user_authorized(api_id: int, api_hash: str, global_cfg: dict[st
             continue
 
         _save_user_session_string(global_cfg, global_config_path, session_string)
-        print("Авторизация успешна.", flush=True)
-        print("User session сохранена.", flush=True)
+        print("Авторизация успешна, user_session_string сохранён", flush=True)
         return session_string
