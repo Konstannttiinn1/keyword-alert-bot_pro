@@ -12,6 +12,7 @@ from typing import Any
 
 from telethon import Button, TelegramClient, events
 from telethon.sessions import StringSession
+from dotenv import load_dotenv
 
 from filters.relevance import RelevanceFilter, normalize_text
 from import_dataset import import_file_to_dataset
@@ -27,6 +28,7 @@ LABEL_CONTEXT: dict[str, dict[str, Any]] = {}
 ADMIN_STATE: dict[int, dict[str, Any]] = {}
 SAVED_ALERT_IDS: set[str] = set()
 DEBUG_SOURCE = False
+DEBUG_MONITOR = False
 
 
 @dataclass
@@ -339,6 +341,15 @@ def admin_menu_buttons(tenant_id: str):
     ]
 
 
+def format_source_chats_status(tenants: dict[str, dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for tenant_id, cfg in tenants.items():
+        chats = sorted(get_tenant_chat_ids(cfg))
+        samples = ", ".join(str(chat_id) for chat_id in chats[:3]) if chats else "-"
+        lines.append(f"- {tenant_id}: count={len(chats)} sample={samples}")
+    return "\n".join(lines) if lines else "- tenants not configured"
+
+
 def import_choice_buttons(tenant_id: str):
     return [
         [Button.inline("✅ Релевантные", f"adm:import_rel:{tenant_id}"), Button.inline("❌ Нерелевантные", f"adm:import_not:{tenant_id}")],
@@ -465,10 +476,12 @@ async def save_tenant_cfg(cfg: dict[str, Any]) -> None:
 
 
 async def main() -> None:
+    load_dotenv(BASE_DIR / ".env")
     global_cfg = load_global_config()
     if not global_cfg.get("api_id") or not global_cfg.get("api_hash"):
         raise RuntimeError("Не заданы api_id/api_hash")
     if not global_cfg.get("bot_token"):
+        print("BOT_TOKEN missing", flush=True)
         raise RuntimeError("Не задан bot_token")
 
     user_session_string = global_cfg.get("user_session_string", "")
@@ -490,32 +503,37 @@ async def main() -> None:
         return f"{username} (id={me.id}, first_name={first_name})"
 
     try:
+        monitoring_enabled = False
+        user_me = None
+
         await user_client.connect()
         if not await user_client.is_user_authorized():
-            print("user_client требует логин (не авторизован)", flush=True)
+            print("user_client not authorized: monitoring disabled", flush=True)
             print("Сохраните user_session_string в config/global.json и перезапустите бота.", flush=True)
-            raise RuntimeError("user_client не авторизован")
-        await user_client.start()
+        else:
+            await user_client.start()
+            user_me = await user_client.get_me()
+            if user_me is None:
+                raise RuntimeError("Не удалось получить данные user_client")
+            if getattr(user_me, "bot", False):
+                raise RuntimeError("Ошибка конфигурации: user_client авторизован как бот. Укажите user_session_string/user_session_name пользовательского аккаунта.")
+            monitoring_enabled = True
 
         await bot_client.start(bot_token=global_cfg["bot_token"])
-
-        me_user = await user_client.get_me()
         me_bot = await bot_client.get_me()
-        if me_user is None or me_bot is None:
-            raise RuntimeError("Не удалось получить данные аккаунтов user_client/bot_client")
-
-        user_phone = getattr(me_user, "phone", None) or "n/a"
-        print(f"user_client=@{getattr(me_user, 'username', None) or '(no username)'} id={me_user.id} phone={user_phone}", flush=True)
-        print(f"bot_client=@{getattr(me_bot, 'username', None) or '(no username)'} id={me_bot.id}", flush=True)
-
-        if getattr(me_user, "bot", False):
-            raise RuntimeError("Ошибка конфигурации: user_client авторизован как бот. Укажите user_session_string/user_session_name пользовательского аккаунта.")
+        if me_bot is None:
+            raise RuntimeError("Не удалось получить данные bot_client")
         if not getattr(me_bot, "bot", False):
             raise RuntimeError("Ошибка конфигурации: bot_client должен быть авторизован как бот через bot_token.")
 
         bot_me = me_bot
-        user_me = me_user
-        if not user_session_string:
+        user_phone = getattr(user_me, "phone", None) or "n/a"
+        user_label = f"@{getattr(user_me, 'username', None) or '(no username)'}" if user_me else "not-authorized"
+        user_id = user_me.id if user_me else "n/a"
+        print(f"user_client={user_label} id={user_id} phone={user_phone}", flush=True)
+        print(f"bot_client=@{getattr(me_bot, 'username', None) or '(no username)'} id={me_bot.id}", flush=True)
+
+        if monitoring_enabled and not user_session_string:
             print("Скопируйте user_session_string в config/global.json:", flush=True)
             print(user_client.session.save(), flush=True)
 
@@ -678,7 +696,101 @@ async def main() -> None:
                 if not matched_tenant:
                     await event.respond("Доступ запрещён")
                     return
-                await event.respond("Меню управления:", buttons=admin_menu_buttons(matched_tenant))
+                await event.respond("Меню управления: (/status, /connect_user)", buttons=admin_menu_buttons(matched_tenant))
+                return
+
+            if event.raw_text and event.raw_text.strip().startswith("/status"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                source_status = format_source_chats_status(tenants)
+                await event.respond(
+                    "\n".join(
+                        [
+                            "bot_client: ok",
+                            f"user_client: {'authorized' if monitoring_enabled else 'NOT authorized'}",
+                            f"monitoring: {'ON' if monitoring_enabled else 'OFF'}",
+                            "source_chats:",
+                            source_status,
+                        ]
+                    )
+                )
+                return
+
+            if event.raw_text and event.raw_text.strip().startswith("/connect_user"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                if not user_session_string:
+                    await event.respond(
+                        "user_session_string не задан.\n"
+                        "1) Запусти: python generate_user_session.py\n"
+                        "2) Введи телефон/код/2FA\n"
+                        "3) Вставь USER_SESSION_STRING в config/global.json -> user_session_string"
+                    )
+                else:
+                    await event.respond("Сессия задана. Перезапусти процесс бота для включения мониторинга.")
+                return
+
+            if event.raw_text and event.raw_text.strip().startswith("/debug_monitor"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                global DEBUG_MONITOR
+                parts = event.raw_text.strip().split(maxsplit=1)
+                action = (parts[1].strip().lower() if len(parts) > 1 else "status")
+                if action == "on":
+                    DEBUG_MONITOR = True
+                    await event.respond("debug_monitor: ON")
+                elif action == "off":
+                    DEBUG_MONITOR = False
+                    await event.respond("debug_monitor: OFF")
+                elif action == "status":
+                    await event.respond(f"debug_monitor: {'ON' if DEBUG_MONITOR else 'OFF'}")
+                else:
+                    await event.respond("Использование: /debug_monitor on|off|status")
+                return
+
+            if event.raw_text and event.raw_text.strip().startswith("/whoami"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                phone = getattr(user_me, "phone", None) or "n/a"
+                if user_session_string:
+                    session_info = "session_string=present"
+                else:
+                    session_file = str(user_session_name)
+                    session_info = f"session_name={session_file}"
+                user_account = _format_account(user_me) if user_me else "not-authorized"
+                await event.respond(
+                    "\n".join(
+                        [
+                            f"bot_client: {_format_account(bot_me)}",
+                            f"user_client: {user_account}, phone={phone}",
+                            f"session: {session_info}",
+                            f"default_tenant: {global_cfg.get('default_tenant')}",
+                        ]
+                    )
+                )
+                return
+
+            if event.raw_text and event.raw_text.strip().startswith("/debug_source"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                global DEBUG_SOURCE
+                parts = event.raw_text.strip().split(maxsplit=1)
+                action = (parts[1].strip().lower() if len(parts) > 1 else "status")
+                if action == "on":
+                    DEBUG_SOURCE = True
+                    await event.respond("debug_source: ON")
+                elif action == "off":
+                    DEBUG_SOURCE = False
+                    await event.respond("debug_source: OFF")
+                elif action == "status":
+                    await event.respond(f"debug_source: {'ON' if DEBUG_SOURCE else 'OFF'}")
+                else:
+                    await event.respond("Использование: /debug_source on|off|status")
                 return
 
             if event.raw_text and event.raw_text.strip().startswith("/whoami"):
@@ -847,14 +959,18 @@ async def main() -> None:
 
         @user_client.on(events.NewMessage())
         async def source_message_handler(event):
+            if not monitoring_enabled:
+                return
+
             text = event.message.message or ""
             if not text:
                 return
 
             tenants = load_tenants_with_paths()
             matched_tenants = [tenant_id for tenant_id, tenant_cfg in tenants.items() if str(event.chat_id) in {str(chat) for chat in get_tenant_chat_ids(tenant_cfg)}]
-            tenant_match = ",".join(matched_tenants) if matched_tenants else "None"
-            print(f"[SourceMessage] chat_id={event.chat_id} tenant_match={tenant_match} (via user_client)", flush=True)
+            if DEBUG_MONITOR:
+                tenant_match = ",".join(matched_tenants) if matched_tenants else "None"
+                print(f"[SourceMessage] chat_id={event.chat_id} tenant_match={tenant_match} (via user_client)", flush=True)
 
             for tenant_id in matched_tenants:
                 tenant_cfg = tenants[tenant_id]
@@ -933,10 +1049,14 @@ async def main() -> None:
                             f"[Pipeline] tenant={tenant_id} sent decision={result.decision} admin_id={admin_id} source_chat_id={event.chat_id}",
                             flush=True,
                         )
-        print("Бот запущен (user_client + bot_client)", flush=True)
-        await asyncio.gather(user_client.run_until_disconnected(), bot_client.run_until_disconnected())
+        print("Бот запущен", flush=True)
+        if monitoring_enabled:
+            await asyncio.gather(user_client.run_until_disconnected(), bot_client.run_until_disconnected())
+        else:
+            await bot_client.run_until_disconnected()
     finally:
-        await user_client.disconnect()
+        if user_client.is_connected():
+            await user_client.disconnect()
         await bot_client.disconnect()
 
 
