@@ -26,6 +26,7 @@ CONFIG_LOCK = asyncio.Lock()
 LABEL_CONTEXT: dict[str, dict[str, Any]] = {}
 ADMIN_STATE: dict[int, dict[str, Any]] = {}
 SAVED_ALERT_IDS: set[str] = set()
+DEBUG_SOURCE = False
 
 
 @dataclass
@@ -51,9 +52,19 @@ def load_global_config() -> dict[str, Any]:
     if not GLOBAL_CONFIG_PATH.exists():
         raise FileNotFoundError("Отсутствует config/global.json")
     cfg = _read_json(GLOBAL_CONFIG_PATH)
+
     token = cfg.get("bot_token", "")
     if token.startswith("${") and token.endswith("}"):
         cfg["bot_token"] = os.getenv(token[2:-1], "")
+
+    if not cfg.get("user_session_string") and cfg.get("session_string"):
+        cfg["user_session_string"] = cfg.get("session_string")
+        print("DEPRECATED: use user_session_string instead of session_string", flush=True)
+
+    if not cfg.get("user_session_name") and cfg.get("session_name"):
+        cfg["user_session_name"] = cfg.get("session_name")
+        print("DEPRECATED: use user_session_name instead of session_name", flush=True)
+
     return cfg
 
 
@@ -404,6 +415,11 @@ async def send_with_routing(bot_client: TelegramClient, routing: dict[str, Any],
         return False
 
     thread_id = routing.get(thread_key)
+    decision_kind = {"alert": "ALERT", "review": "UNCERTAIN", "data": "DROP"}.get(kind, kind.upper())
+    print(
+        f"[Notify] kind={decision_kind} target_chat_id={chat_id} thread_id={thread_id} (via bot_client)",
+        flush=True,
+    )
     if thread_id:
         await bot_client.send_message(int(chat_id), text, buttons=buttons, reply_to=int(thread_id))
     else:
@@ -450,19 +466,58 @@ async def save_tenant_cfg(cfg: dict[str, Any]) -> None:
 
 async def main() -> None:
     global_cfg = load_global_config()
+    if not global_cfg.get("api_id") or not global_cfg.get("api_hash"):
+        raise RuntimeError("Не заданы api_id/api_hash")
     if not global_cfg.get("bot_token"):
-        raise RuntimeError("Не задан BOT_TOKEN")
+        raise RuntimeError("Не задан bot_token")
 
-    session_string = global_cfg.get("session_string", "")
-    string_session = StringSession(session_string) if session_string else StringSession()
-    bot_client = TelegramClient(string_session, global_cfg["api_id"], global_cfg["api_hash"])
+    user_session_string = global_cfg.get("user_session_string", "")
+    user_session_name = global_cfg.get("user_session_name", "user.session")
+    bot_session_name = global_cfg.get("bot_session_name", "bot_session")
+
+    if not user_session_string and str(user_session_name) == str(bot_session_name):
+        raise RuntimeError("user_session_name и bot_session_name должны быть разными")
+
+    user_session = StringSession(user_session_string) if user_session_string else user_session_name
+
+    user_client = TelegramClient(user_session, global_cfg["api_id"], global_cfg["api_hash"])
+    bot_client = TelegramClient(bot_session_name, global_cfg["api_id"], global_cfg["api_hash"])
     model_cache: dict[str, RelevanceFilter] = {}
 
+    def _format_account(me: Any) -> str:
+        username = f"@{me.username}" if getattr(me, "username", None) else "(no username)"
+        first_name = getattr(me, "first_name", None) or ""
+        return f"{username} (id={me.id}, first_name={first_name})"
+
     try:
+        await user_client.connect()
+        if not await user_client.is_user_authorized():
+            print("user_client требует логин (не авторизован)", flush=True)
+            print("Сохраните user_session_string в config/global.json и перезапустите бота.", flush=True)
+            raise RuntimeError("user_client не авторизован")
+        await user_client.start()
+
         await bot_client.start(bot_token=global_cfg["bot_token"])
-        if not session_string:
-            print("Скопируйте session_string в config/global.json:")
-            print(bot_client.session.save())
+
+        me_user = await user_client.get_me()
+        me_bot = await bot_client.get_me()
+        if me_user is None or me_bot is None:
+            raise RuntimeError("Не удалось получить данные аккаунтов user_client/bot_client")
+
+        user_phone = getattr(me_user, "phone", None) or "n/a"
+        print(f"user_client=@{getattr(me_user, 'username', None) or '(no username)'} id={me_user.id} phone={user_phone}", flush=True)
+        print(f"bot_client=@{getattr(me_bot, 'username', None) or '(no username)'} id={me_bot.id}", flush=True)
+
+        if getattr(me_user, "bot", False):
+            raise RuntimeError("Ошибка конфигурации: user_client авторизован как бот. Укажите user_session_string/user_session_name пользовательского аккаунта.")
+        if not getattr(me_bot, "bot", False):
+            raise RuntimeError("Ошибка конфигурации: bot_client должен быть авторизован как бот через bot_token.")
+
+        bot_me = me_bot
+        user_me = me_user
+        if not user_session_string:
+            print("Скопируйте user_session_string в config/global.json:", flush=True)
+            print(user_client.session.save(), flush=True)
 
         @bot_client.on(events.CallbackQuery)
         async def callback_handler(event):
@@ -610,20 +665,61 @@ async def main() -> None:
                 return
 
         @bot_client.on(events.NewMessage())
-        async def new_message_handler(event):
+        async def admin_message_handler(event):
             sender = await event.get_sender()
             chat_id = event.chat_id
             is_private = bool(event.is_private)
             tenants = load_tenants_with_paths()
             default_tenant = global_cfg.get("default_tenant")
             matched_tenant = resolve_tenant_for_admin(sender.id, tenants, default_tenant)
-            print(f"[NewMessage] chat_id={chat_id} is_private={is_private} tenant_match={matched_tenant}", flush=True)
+            print(f"[NewMessage] chat_id={chat_id} is_private={is_private} tenant_match={matched_tenant} (via bot_client)", flush=True)
 
             if is_private and event.raw_text and event.raw_text.strip().startswith("/start"):
                 if not matched_tenant:
                     await event.respond("Доступ запрещён")
                     return
                 await event.respond("Меню управления:", buttons=admin_menu_buttons(matched_tenant))
+                return
+
+            if event.raw_text and event.raw_text.strip().startswith("/whoami"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                phone = getattr(user_me, "phone", None) or "n/a"
+                if user_session_string:
+                    session_info = "session_string=present"
+                else:
+                    session_file = str(user_session_name)
+                    session_info = f"session_name={session_file}"
+                await event.respond(
+                    "\n".join(
+                        [
+                            f"bot_client: {_format_account(bot_me)}",
+                            f"user_client: {_format_account(user_me)}, phone={phone}",
+                            f"session: {session_info}",
+                            f"default_tenant: {global_cfg.get('default_tenant')}",
+                        ]
+                    )
+                )
+                return
+
+            if event.raw_text and event.raw_text.strip().startswith("/debug_source"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                global DEBUG_SOURCE
+                parts = event.raw_text.strip().split(maxsplit=1)
+                action = (parts[1].strip().lower() if len(parts) > 1 else "status")
+                if action == "on":
+                    DEBUG_SOURCE = True
+                    await event.respond("debug_source: ON")
+                elif action == "off":
+                    DEBUG_SOURCE = False
+                    await event.respond("debug_source: OFF")
+                elif action == "status":
+                    await event.respond(f"debug_source: {'ON' if DEBUG_SOURCE else 'OFF'}")
+                else:
+                    await event.respond("Использование: /debug_source on|off|status")
                 return
 
             if event.raw_text and event.raw_text.strip().startswith("/bind"):
@@ -738,16 +834,30 @@ async def main() -> None:
                     await event.respond(f"Импортировано примеров: {count}")
                     return
 
-            # Текущая логика алертов (не изменяем по смыслу)
+        @user_client.on(events.NewMessage(incoming=True))
+        async def source_raw_debug_handler(event):
+            if not DEBUG_SOURCE:
+                return
+            raw_text = (event.raw_text or "").replace("\n", " ").strip()
+            short_text = raw_text[:50]
+            print(
+                f"[SourceRaw] chat_id={event.chat_id} is_private={event.is_private} sender={getattr(event, 'sender_id', None)} text={short_text}",
+                flush=True,
+            )
+
+        @user_client.on(events.NewMessage())
+        async def source_message_handler(event):
             text = event.message.message or ""
             if not text:
                 return
 
-            for tenant_id, tenant_cfg in tenants.items():
-                chats = {str(chat) for chat in get_tenant_chat_ids(tenant_cfg)}
-                if str(event.chat_id) not in chats:
-                    continue
+            tenants = load_tenants_with_paths()
+            matched_tenants = [tenant_id for tenant_id, tenant_cfg in tenants.items() if str(event.chat_id) in {str(chat) for chat in get_tenant_chat_ids(tenant_cfg)}]
+            tenant_match = ",".join(matched_tenants) if matched_tenants else "None"
+            print(f"[SourceMessage] chat_id={event.chat_id} tenant_match={tenant_match} (via user_client)", flush=True)
 
+            for tenant_id in matched_tenants:
+                tenant_cfg = tenants[tenant_id]
                 source_label = get_chat_label(tenant_cfg, int(event.chat_id))
 
                 lower = text.lower()
@@ -823,10 +933,10 @@ async def main() -> None:
                             f"[Pipeline] tenant={tenant_id} sent decision={result.decision} admin_id={admin_id} source_chat_id={event.chat_id}",
                             flush=True,
                         )
-
-        print("Бот запущен", flush=True)
-        await bot_client.run_until_disconnected()
+        print("Бот запущен (user_client + bot_client)", flush=True)
+        await asyncio.gather(user_client.run_until_disconnected(), bot_client.run_until_disconnected())
     finally:
+        await user_client.disconnect()
         await bot_client.disconnect()
 
 
