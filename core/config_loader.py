@@ -88,10 +88,13 @@ def load_telegram_credentials(require_phone: bool = False) -> TelegramCredential
         raise RuntimeError("api_hash must be 32 hex characters")
 
     phone = normalize_phone(phone_raw) if phone_raw else None
-    if require_phone and not phone:
-        raise RuntimeError("Phone is required: set TG_PHONE or tg_phone in config/global.json")
-    if phone and not PHONE_RE.fullmatch(phone):
-        raise RuntimeError("phone must match +<8..15 digits>")
+    if require_phone:
+        if not phone:
+            raise RuntimeError("Phone is required: set TG_PHONE or tg_phone in config/global.json")
+        if not PHONE_RE.fullmatch(phone):
+            raise RuntimeError("phone must match ^\\+[0-9]{8,15}$")
+    elif phone and not PHONE_RE.fullmatch(phone):
+        raise RuntimeError("phone must match ^\\+[0-9]{8,15}$")
 
     print(
         f"[ConfigLoader] api_id={api_id} ({api_id_src}) | api_hash={_mask_hash(api_hash)} ({api_hash_src}) | phone={phone or '<not set>'} ({phone_src})",
