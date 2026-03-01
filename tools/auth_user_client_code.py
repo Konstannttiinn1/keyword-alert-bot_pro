@@ -7,6 +7,7 @@ from telethon.errors import (
     ApiIdInvalidError,
     FloodWaitError,
     PasswordHashInvalidError,
+    PasswordTooFreshError,
     PhoneCodeInvalidError,
     PhoneNumberInvalidError,
     SessionPasswordNeededError,
@@ -24,12 +25,22 @@ def _is_valid_phone(phone: str) -> bool:
 
 async def _handle_2fa(client: TelegramClient) -> bool:
     for attempt in range(1, 4):
+        print("[2FA] Запрос пароля...", flush=True)
         password = getpass("Введите пароль 2FA: ")
+        print("[2FA] Пароль введен, отправляю...", flush=True)
         try:
             await client.sign_in(password=password)
+            print("[2FA] Проверка авторизации...", flush=True)
+            authorized = await client.is_user_authorized()
+            print(f"[2FA] is_user_authorized: {authorized}", flush=True)
+            if authorized:
+                print(f"[2FA] session.save(): {client.session.save()[:20]}...", flush=True)
             return True
         except PasswordHashInvalidError:
             print(f"Неверный пароль 2FA (попытка {attempt}/3)", flush=True)
+        except PasswordTooFreshError:
+            print("Пароль 2FA слишком свежий. Подождите и попробуйте снова.", flush=True)
+            return False
     print("Достигнут лимит попыток пароля 2FA.", flush=True)
     return False
 
@@ -65,6 +76,10 @@ async def main() -> None:
 
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+            authorized = await client.is_user_authorized()
+            print(f"[2FA] is_user_authorized: {authorized}", flush=True)
+            if not authorized:
+                return
         except SessionPasswordNeededError:
             print("Требуется пароль 2FA.", flush=True)
             ok = await _handle_2fa(client)

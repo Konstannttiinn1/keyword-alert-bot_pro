@@ -11,6 +11,7 @@ from telethon.errors import (
     ApiIdInvalidError,
     FloodWaitError,
     PasswordHashInvalidError,
+    PasswordTooFreshError,
     PhoneNumberInvalidError,
     SessionPasswordNeededError,
 )
@@ -51,8 +52,12 @@ def _is_valid_phone(phone: str) -> bool:
 
 
 def _save_user_session_string(global_cfg: dict[str, Any], global_config_path: Path, session_string: str) -> None:
+    if global_config_path.exists():
+        backup_path = global_config_path.with_suffix(global_config_path.suffix + ".bak")
+        backup_path.write_text(global_config_path.read_text(encoding="utf-8"), encoding="utf-8")
     global_cfg["user_session_string"] = session_string
     _write_json_atomic(global_config_path, global_cfg)
+    print("✅ Session сохранен в config/global.json", flush=True)
 
 
 def _print_auth_menu() -> None:
@@ -97,12 +102,24 @@ def _print_ascii_qr(url: str) -> None:
 
 async def _sign_in_with_2fa(auth_client: TelegramClient) -> bool:
     for attempt in range(1, 4):
+        print("[2FA] Запрос пароля...", flush=True)
         password = getpass("Введите пароль 2FA: ")
+        print("[2FA] Пароль введен, отправляю...", flush=True)
         try:
             await auth_client.sign_in(password=password)
+            print("[2FA] Проверка авторизации...", flush=True)
+            authorized = await auth_client.is_user_authorized()
+            print(f"[2FA] is_user_authorized: {authorized}", flush=True)
+            if not authorized:
+                return False
+            session_preview = auth_client.session.save()
+            print(f"[2FA] session.save(): {session_preview[:20]}...", flush=True)
             return True
         except PasswordHashInvalidError:
             print(f"Неверный пароль 2FA (попытка {attempt}/3)", flush=True)
+        except PasswordTooFreshError:
+            print("Пароль 2FA слишком свежий. Подождите и попробуйте снова.", flush=True)
+            return False
         except Exception:
             print("Ошибка при проверке пароля 2FA.", flush=True)
             return False
@@ -110,7 +127,7 @@ async def _sign_in_with_2fa(auth_client: TelegramClient) -> bool:
     return False
 
 
-async def _authorize_via_qr(api_id: int, api_hash: str, timeout: int = 600) -> str | None:
+async def _authorize_via_qr(api_id: int, api_hash: str, timeout: int = 60) -> str | None:
     auth_client = TelegramClient(StringSession(), api_id, api_hash)
     out_path = Path.cwd() / "data" / "auth" / "qr_login.png"
     try:
@@ -125,13 +142,30 @@ async def _authorize_via_qr(api_id: int, api_hash: str, timeout: int = 600) -> s
             print("Настройки → Устройства → Сканировать QR", flush=True)
             try:
                 await qr.wait(timeout=timeout)
-                return auth_client.session.save()
+                authorized = await auth_client.is_user_authorized()
+                print(f"[2FA] is_user_authorized: {authorized}", flush=True)
+                if not authorized:
+                    return None
+                saved = auth_client.session.save()
+                print(f"[2FA] session.save(): {saved[:20]}...", flush=True)
+                return saved
             except SessionPasswordNeededError:
                 print("Для завершения QR входа требуется пароль 2FA.", flush=True)
                 ok = await _sign_in_with_2fa(auth_client)
-                return auth_client.session.save() if ok else None
+                if not ok:
+                    return None
+                authorized = await auth_client.is_user_authorized()
+                print(f"[2FA] is_user_authorized: {authorized}", flush=True)
+                if not authorized:
+                    return None
+                saved = auth_client.session.save()
+                print(f"[2FA] session.save(): {saved[:20]}...", flush=True)
+                return saved
             except asyncio.TimeoutError:
                 print("QR токен истёк. Пересоздаю QR...", flush=True)
+                continue
+            except TimeoutError:
+                print("Таймаут ожидания подтверждения QR. Пересоздаю QR...", flush=True)
                 continue
     except FloodWaitError as exc:
         print(f"Слишком много попыток. Подождите {exc.seconds} секунд.", flush=True)
@@ -183,13 +217,23 @@ async def _authorize_via_code(api_id: int, api_hash: str, phone_from_cfg: str | 
         code = input("Введите код из Telegram: ").strip()
         try:
             await auth_client.sign_in(phone=phone, code=code, phone_code_hash=sent.phone_code_hash)
+            authorized = await auth_client.is_user_authorized()
+            print(f"[2FA] is_user_authorized: {authorized}", flush=True)
+            if not authorized:
+                return None
         except SessionPasswordNeededError:
             print("Требуется пароль 2FA.", flush=True)
             ok = await _sign_in_with_2fa(auth_client)
             if not ok:
                 return None
+            authorized = await auth_client.is_user_authorized()
+            print(f"[2FA] is_user_authorized: {authorized}", flush=True)
+            if not authorized:
+                return None
 
-        return auth_client.session.save()
+        saved = auth_client.session.save()
+        print(f"[2FA] session.save(): {saved[:20]}...", flush=True)
+        return saved
     except FloodWaitError as exc:
         print(f"Слишком много попыток. Подождите {exc.seconds} секунд.", flush=True)
     except PhoneNumberInvalidError:

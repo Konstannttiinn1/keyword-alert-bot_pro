@@ -4,7 +4,7 @@ from getpass import getpass
 from pathlib import Path
 
 from telethon import TelegramClient
-from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
+from telethon.errors import FloodWaitError, PasswordHashInvalidError, PasswordTooFreshError, SessionPasswordNeededError
 from telethon.sessions import StringSession
 
 from core.config_loader import BASE_DIR, load_telegram_credentials
@@ -12,7 +12,7 @@ from core.config_loader import BASE_DIR, load_telegram_credentials
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Authorize Telegram user session via QR login")
-    parser.add_argument("--timeout", type=int, default=300, help="Seconds to wait for QR confirmation (default: 300)")
+    parser.add_argument("--timeout", type=int, default=60, help="Seconds to wait for QR confirmation (default: 60)")
     parser.add_argument("--loop", action="store_true", help="Regenerate QR on timeout and continue waiting")
     parser.add_argument("--out", default="qr_login.png", help="Output PNG path for generated QR (default: qr_login.png)")
     return parser
@@ -36,12 +36,22 @@ def _save_qr_if_available(url: str, out_path: Path) -> None:
 
 async def _handle_2fa(client: TelegramClient) -> bool:
     for attempt in range(1, 4):
+        print("[2FA] Запрос пароля...", flush=True)
         password = getpass("Введите пароль 2FA: ")
+        print("[2FA] Пароль введен, отправляю...", flush=True)
         try:
             await client.sign_in(password=password)
+            print("[2FA] Проверка авторизации...", flush=True)
+            authorized = await client.is_user_authorized()
+            print(f"[2FA] is_user_authorized: {authorized}", flush=True)
+            if authorized:
+                print(f"[2FA] session.save(): {client.session.save()[:20]}...", flush=True)
             return True
         except PasswordHashInvalidError:
             print(f"Неверный пароль 2FA (попытка {attempt}/3)", flush=True)
+        except PasswordTooFreshError:
+            print("Пароль 2FA слишком свежий. Подождите и попробуйте снова.", flush=True)
+            return False
     print("Достигнут лимит попыток пароля 2FA.", flush=True)
     return False
 
@@ -91,6 +101,8 @@ async def main() -> None:
         print("USER_SESSION_STRING=")
         print(client.session.save())
         print("Сохраните строку в env или config/global.json -> user_session_string", flush=True)
+    except FloodWaitError as exc:
+        print(f"Слишком много попыток. Подождите {exc.seconds} секунд.", flush=True)
     finally:
         await client.disconnect()
 
