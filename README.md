@@ -10,10 +10,11 @@ Multi-tenant Telegram-бот для мониторинга ключевых сл
 ```json
 {
   "api_id": 123456,
-  "api_hash": "your_api_hash",
-  "session_name": "session",
-  "session_string": "",
+  "api_hash": "0123456789abcdef0123456789abcdef",
   "bot_token": "${BOT_TOKEN}",
+  "user_session_string": "",
+  "user_session_name": "user.session",
+  "bot_session_name": "bot_session",
   "default_tenant": "demo"
 }
 ```
@@ -70,6 +71,11 @@ Multi-tenant Telegram-бот для мониторинга ключевых сл
   - `alert_thread_id` / `review_thread_id` / `data_thread_id` — ID темы (topic), отправка через `reply_to`
 - если `routing` не задан — отправка остаётся по `admins` (как раньше).
 
+
+### Важно
+- `config/global.json` — единственный глобальный конфиг проекта.
+- `config/tenants/*.json` — tenant-конфиги.
+- `config.json` больше не используется (если файл остался в корне — удалите его).
 ## 1.1) Привязка routing к темам через кнопки
 
 - В личке бота откройте `/start` → `🧭 routing`.
@@ -149,7 +155,7 @@ python Keyword-alert.py
 - `TG_API_HASH`
 - `TG_PHONE` (для app-кода)
 
-Порядок загрузки во всех auth-скриптах: **ENV/.env → config/global.json → config.json (deprecated fallback)**.
+Порядок загрузки во всех auth-скриптах: **ENV/.env → config/global.json**. `config.json` больше не используется.
 
 ## 8) Получить `user_session_string` через QR
 

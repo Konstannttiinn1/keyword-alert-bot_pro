@@ -478,6 +478,8 @@ async def save_tenant_cfg(cfg: dict[str, Any]) -> None:
 
 async def main() -> None:
     load_dotenv(BASE_DIR / ".env")
+    if (BASE_DIR / "config.json").exists():
+        print("WARNING: config.json больше не используется, удалите файл", flush=True)
     global_cfg = load_global_config()
     if not global_cfg.get("api_id") or not global_cfg.get("api_hash"):
         raise RuntimeError("Не заданы api_id/api_hash")
