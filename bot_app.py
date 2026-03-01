@@ -508,7 +508,7 @@ async def main() -> None:
 
         await user_client.connect()
         if not await user_client.is_user_authorized():
-            print("user_client not authorized: monitoring disabled", flush=True)
+            print("⚠ user_client не авторизован — мониторинг выключен, UI работает", flush=True)
             print("Сохраните user_session_string в config/global.json и перезапустите бота.", flush=True)
         else:
             await user_client.start()
@@ -696,7 +696,11 @@ async def main() -> None:
                 if not matched_tenant:
                     await event.respond("Доступ запрещён")
                     return
-                await event.respond("Меню управления: (/status, /connect_user)", buttons=admin_menu_buttons(matched_tenant))
+                await event.respond(
+                    "Меню управления: (/status, /connect_user)\n"
+                    f"Monitoring: {'ON' if monitoring_enabled else 'OFF (user session not configured)'}",
+                    buttons=admin_menu_buttons(matched_tenant),
+                )
                 return
 
             if event.raw_text and event.raw_text.strip().startswith("/status"):
@@ -767,47 +771,6 @@ async def main() -> None:
                         [
                             f"bot_client: {_format_account(bot_me)}",
                             f"user_client: {user_account}, phone={phone}",
-                            f"session: {session_info}",
-                            f"default_tenant: {global_cfg.get('default_tenant')}",
-                        ]
-                    )
-                )
-                return
-
-            if event.raw_text and event.raw_text.strip().startswith("/debug_source"):
-                if not matched_tenant:
-                    await event.respond("Доступ запрещён")
-                    return
-                global DEBUG_SOURCE
-                parts = event.raw_text.strip().split(maxsplit=1)
-                action = (parts[1].strip().lower() if len(parts) > 1 else "status")
-                if action == "on":
-                    DEBUG_SOURCE = True
-                    await event.respond("debug_source: ON")
-                elif action == "off":
-                    DEBUG_SOURCE = False
-                    await event.respond("debug_source: OFF")
-                elif action == "status":
-                    await event.respond(f"debug_source: {'ON' if DEBUG_SOURCE else 'OFF'}")
-                else:
-                    await event.respond("Использование: /debug_source on|off|status")
-                return
-
-            if event.raw_text and event.raw_text.strip().startswith("/whoami"):
-                if not matched_tenant:
-                    await event.respond("Доступ запрещён")
-                    return
-                phone = getattr(user_me, "phone", None) or "n/a"
-                if user_session_string:
-                    session_info = "session_string=present"
-                else:
-                    session_file = str(user_session_name)
-                    session_info = f"session_name={session_file}"
-                await event.respond(
-                    "\n".join(
-                        [
-                            f"bot_client: {_format_account(bot_me)}",
-                            f"user_client: {_format_account(user_me)}, phone={phone}",
                             f"session: {session_info}",
                             f"default_tenant: {global_cfg.get('default_tenant')}",
                         ]
@@ -946,109 +909,110 @@ async def main() -> None:
                     await event.respond(f"Импортировано примеров: {count}")
                     return
 
-        @user_client.on(events.NewMessage(incoming=True))
-        async def source_raw_debug_handler(event):
-            if not DEBUG_SOURCE:
-                return
-            raw_text = (event.raw_text or "").replace("\n", " ").strip()
-            short_text = raw_text[:50]
-            print(
-                f"[SourceRaw] chat_id={event.chat_id} is_private={event.is_private} sender={getattr(event, 'sender_id', None)} text={short_text}",
-                flush=True,
-            )
-
-        @user_client.on(events.NewMessage())
-        async def source_message_handler(event):
-            if not monitoring_enabled:
-                return
-
-            text = event.message.message or ""
-            if not text:
-                return
-
-            tenants = load_tenants_with_paths()
-            matched_tenants = [tenant_id for tenant_id, tenant_cfg in tenants.items() if str(event.chat_id) in {str(chat) for chat in get_tenant_chat_ids(tenant_cfg)}]
-            if DEBUG_MONITOR:
-                tenant_match = ",".join(matched_tenants) if matched_tenants else "None"
-                print(f"[SourceMessage] chat_id={event.chat_id} tenant_match={tenant_match} (via user_client)", flush=True)
-
-            for tenant_id in matched_tenants:
-                tenant_cfg = tenants[tenant_id]
-                source_label = get_chat_label(tenant_cfg, int(event.chat_id))
-
-                lower = text.lower()
-                tenant_keywords = tenant_cfg.get("keywords", [])
+        if monitoring_enabled and user_client:
+            @user_client.on(events.NewMessage(incoming=True))
+            async def source_raw_debug_handler(event):
+                if not DEBUG_SOURCE:
+                    return
+                raw_text = (event.raw_text or "").replace("\n", " ").strip()
+                short_text = raw_text[:50]
                 print(
-                    f"[Pipeline] tenant={tenant_id} source_chat_id={event.chat_id} source_label={source_label} text='{text[:120]}' keywords={tenant_keywords}",
+                    f"[SourceRaw] chat_id={event.chat_id} is_private={event.is_private} sender={getattr(event, 'sender_id', None)} text={short_text}",
                     flush=True,
                 )
-                found_keyword = next((kw for kw in tenant_keywords if kw.lower() in lower), None)
-                if not found_keyword:
-                    print(f"[Pipeline] tenant={tenant_id} keyword_match=нет | skip: no keyword match", flush=True)
-                    continue
 
-                print(f"[Pipeline] tenant={tenant_id} match keyword={found_keyword}", flush=True)
+            @user_client.on(events.NewMessage())
+            async def source_message_handler(event):
+                if not monitoring_enabled:
+                    return
 
-                result = evaluate_message(tenant_cfg, text, model_cache)
-                print(f"[Pipeline] tenant={tenant_id} decision={result.decision}", flush=True)
-                if result.decision == "DROP":
-                    print(f"[Pipeline] tenant={tenant_id} drop chat_id={event.chat_id}", flush=True)
-                    was_saved = save_candidate_if_needed(tenant_cfg, text, found_keyword, event.chat_id, event.message.id)
-                    routing = tenant_cfg.get("routing", {})
-                    if was_saved:
-                        await send_with_routing(
-                            bot_client,
-                            routing,
-                            "data",
-                            (
-                                f"🗂 DROP candidate | tenant={tenant_id}\n"
-                                f"source_chat_id={event.chat_id}\n"
-                                f"source_label={source_label}\n"
-                                f"keyword={found_keyword}\n"
-                                f"text={text[:500]}"
-                            ),
-                        )
-                    continue
+                text = event.message.message or ""
+                if not text:
+                    return
 
-                decision_line = f"Relevance score: {result.score:.2f} | Decision: {result.decision}"
-                link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}" if str(event.chat_id).startswith("-100") else "(нет ссылки)"
-                body = (
-                    f"🚨 Совпадение по tenant: {tenant_id}\n"
-                    f"Источник: chat_id={event.chat_id} label={source_label}\n"
-                    f"Ключевое слово: {found_keyword}\n"
-                    f"Сообщение: {text[:700]}\n"
-                    f"{decision_line}\n"
-                    f"Ссылка: {link}"
-                )
+                tenants = load_tenants_with_paths()
+                matched_tenants = [tenant_id for tenant_id, tenant_cfg in tenants.items() if str(event.chat_id) in {str(chat) for chat in get_tenant_chat_ids(tenant_cfg)}]
+                if DEBUG_MONITOR:
+                    tenant_match = ",".join(matched_tenants) if matched_tenants else "None"
+                    print(f"[SourceMessage] chat_id={event.chat_id} tenant_match={tenant_match} (via user_client)", flush=True)
 
-                token = uuid.uuid4().hex[:10]
-                LABEL_CONTEXT[token] = {
-                    "tenant_id": tenant_id,
-                    "text": text,
-                    "keyword": found_keyword,
-                    "chat_id": event.chat_id,
-                    "message_id": event.message.id,
-                    "is_forward": bool(event.message.fwd_from),
-                }
-                buttons = [[Button.inline("✅ Релевантно", f"lbl:{token}:1"), Button.inline("❌ Нерелевантно", f"lbl:{token}:0")]]
+                for tenant_id in matched_tenants:
+                    tenant_cfg = tenants[tenant_id]
+                    source_label = get_chat_label(tenant_cfg, int(event.chat_id))
 
-                routing = tenant_cfg.get("routing", {})
-                route_kind = "alert" if result.decision == "ALERT" else "review"
-                sent_by_routing = await send_with_routing(bot_client, routing, route_kind, body, buttons=buttons)
-
-                if sent_by_routing:
-                    target_chat_id = routing.get(f"{route_kind}_chat_id")
+                    lower = text.lower()
+                    tenant_keywords = tenant_cfg.get("keywords", [])
                     print(
-                        f"[Pipeline] tenant={tenant_id} sent decision={result.decision} target_chat_id={target_chat_id} source_chat_id={event.chat_id}",
+                        f"[Pipeline] tenant={tenant_id} source_chat_id={event.chat_id} source_label={source_label} text='{text[:120]}' keywords={tenant_keywords}",
                         flush=True,
                     )
-                else:
-                    for admin_id in tenant_cfg.get("admins", []):
-                        await bot_client.send_message(admin_id, body, buttons=buttons)
+                    found_keyword = next((kw for kw in tenant_keywords if kw.lower() in lower), None)
+                    if not found_keyword:
+                        print(f"[Pipeline] tenant={tenant_id} keyword_match=нет | skip: no keyword match", flush=True)
+                        continue
+
+                    print(f"[Pipeline] tenant={tenant_id} match keyword={found_keyword}", flush=True)
+
+                    result = evaluate_message(tenant_cfg, text, model_cache)
+                    print(f"[Pipeline] tenant={tenant_id} decision={result.decision}", flush=True)
+                    if result.decision == "DROP":
+                        print(f"[Pipeline] tenant={tenant_id} drop chat_id={event.chat_id}", flush=True)
+                        was_saved = save_candidate_if_needed(tenant_cfg, text, found_keyword, event.chat_id, event.message.id)
+                        routing = tenant_cfg.get("routing", {})
+                        if was_saved:
+                            await send_with_routing(
+                                bot_client,
+                                routing,
+                                "data",
+                                (
+                                    f"🗂 DROP candidate | tenant={tenant_id}\n"
+                                    f"source_chat_id={event.chat_id}\n"
+                                    f"source_label={source_label}\n"
+                                    f"keyword={found_keyword}\n"
+                                    f"text={text[:500]}"
+                                ),
+                            )
+                        continue
+
+                    decision_line = f"Relevance score: {result.score:.2f} | Decision: {result.decision}"
+                    link = f"https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}" if str(event.chat_id).startswith("-100") else "(нет ссылки)"
+                    body = (
+                        f"🚨 Совпадение по tenant: {tenant_id}\n"
+                        f"Источник: chat_id={event.chat_id} label={source_label}\n"
+                        f"Ключевое слово: {found_keyword}\n"
+                        f"Сообщение: {text[:700]}\n"
+                        f"{decision_line}\n"
+                        f"Ссылка: {link}"
+                    )
+
+                    token = uuid.uuid4().hex[:10]
+                    LABEL_CONTEXT[token] = {
+                        "tenant_id": tenant_id,
+                        "text": text,
+                        "keyword": found_keyword,
+                        "chat_id": event.chat_id,
+                        "message_id": event.message.id,
+                        "is_forward": bool(event.message.fwd_from),
+                    }
+                    buttons = [[Button.inline("✅ Релевантно", f"lbl:{token}:1"), Button.inline("❌ Нерелевантно", f"lbl:{token}:0")]]
+
+                    routing = tenant_cfg.get("routing", {})
+                    route_kind = "alert" if result.decision == "ALERT" else "review"
+                    sent_by_routing = await send_with_routing(bot_client, routing, route_kind, body, buttons=buttons)
+
+                    if sent_by_routing:
+                        target_chat_id = routing.get(f"{route_kind}_chat_id")
                         print(
-                            f"[Pipeline] tenant={tenant_id} sent decision={result.decision} admin_id={admin_id} source_chat_id={event.chat_id}",
+                            f"[Pipeline] tenant={tenant_id} sent decision={result.decision} target_chat_id={target_chat_id} source_chat_id={event.chat_id}",
                             flush=True,
                         )
+                    else:
+                        for admin_id in tenant_cfg.get("admins", []):
+                            await bot_client.send_message(admin_id, body, buttons=buttons)
+                            print(
+                                f"[Pipeline] tenant={tenant_id} sent decision={result.decision} admin_id={admin_id} source_chat_id={event.chat_id}",
+                                flush=True,
+                            )
         print("Бот запущен", flush=True)
         if monitoring_enabled:
             await asyncio.gather(user_client.run_until_disconnected(), bot_client.run_until_disconnected())
