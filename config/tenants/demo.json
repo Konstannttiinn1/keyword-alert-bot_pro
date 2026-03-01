@@ -1,17 +1,36 @@
 {
   "tenant_id": "demo",
-  "admins": [8333432274],
-  "chats": [-10011111111, -10022222222],
+  "admins": [
+    7506256030
+  ],
+  "chats": [
+    -1003754624626,
+    -3754624626,
+    3754624626,
+    1151336194,
+    1369770047,
+    1523471689,
+    1511081491,
+    1952940569
+  ],
   "chat_groups": {
-    "project_main": [-10011111111, -10022222222],
-    "project_extra": [-10033333333]
+    "project_main": [
+      -10011111111,
+      -10022222222
+    ],
+    "project_extra": [
+      -10033333333
+    ]
   },
   "chat_labels": {
     "-10011111111": "основной",
     "-10022222222": "саппорт",
     "-10033333333": "маркетинг"
   },
-  "keywords": ["vpn", "впн"],
+  "keywords": [
+    "vpn",
+    "впн"
+  ],
   "context_filter": {
     "enabled": true,
     "model_path": "models/demo/relevance.joblib",
@@ -28,12 +47,14 @@
     "candidates_dedupe_window_days": 7
   },
   "routing": {
-    "alert_chat_id": -10044444444,
-    "review_chat_id": -10055555555,
-    "data_chat_id": -10066666666,
-    "alert_thread_id": 123,
-    "review_thread_id": 456,
-    "data_thread_id": 789
+    "alert_chat_id": -1003775118821,
+    "review_chat_id": -1003775118821,
+    "data_chat_id": -1003775118821,
+    "review_thread_id": 5,
+    "data_thread_id": 7,
+    "alert_thread_id": 3
   },
-  "llm": { "enabled": false }
+  "llm": {
+    "enabled": false
+  }
 }
