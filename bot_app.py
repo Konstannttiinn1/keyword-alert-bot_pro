@@ -793,6 +793,47 @@ async def main() -> None:
                     await event.respond("Использование: /debug_source on|off|status")
                 return
 
+            if event.raw_text and event.raw_text.strip().startswith("/whoami"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                phone = getattr(user_me, "phone", None) or "n/a"
+                if user_session_string:
+                    session_info = "session_string=present"
+                else:
+                    session_file = str(user_session_name)
+                    session_info = f"session_name={session_file}"
+                await event.respond(
+                    "\n".join(
+                        [
+                            f"bot_client: {_format_account(bot_me)}",
+                            f"user_client: {_format_account(user_me)}, phone={phone}",
+                            f"session: {session_info}",
+                            f"default_tenant: {global_cfg.get('default_tenant')}",
+                        ]
+                    )
+                )
+                return
+
+            if event.raw_text and event.raw_text.strip().startswith("/debug_source"):
+                if not matched_tenant:
+                    await event.respond("Доступ запрещён")
+                    return
+                global DEBUG_SOURCE
+                parts = event.raw_text.strip().split(maxsplit=1)
+                action = (parts[1].strip().lower() if len(parts) > 1 else "status")
+                if action == "on":
+                    DEBUG_SOURCE = True
+                    await event.respond("debug_source: ON")
+                elif action == "off":
+                    DEBUG_SOURCE = False
+                    await event.respond("debug_source: OFF")
+                elif action == "status":
+                    await event.respond(f"debug_source: {'ON' if DEBUG_SOURCE else 'OFF'}")
+                else:
+                    await event.respond("Использование: /debug_source on|off|status")
+                return
+
             if event.raw_text and event.raw_text.strip().startswith("/bind"):
                 parts = event.raw_text.strip().split()
                 state = ADMIN_STATE.get(sender.id)
