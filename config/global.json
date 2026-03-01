@@ -1,8 +1,9 @@
 {
   "api_id": 123456,
   "api_hash": "your_api_hash",
-  "session_name": "session",
-  "session_string": "",
   "bot_token": "${BOT_TOKEN}",
+  "user_session_string": "",
+  "user_session_name": "user.session",
+  "bot_session_name": "bot_session",
   "default_tenant": "demo"
 }
