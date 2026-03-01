@@ -5,7 +5,7 @@ __pycache__/
 *.joblib
 cache/
 .pytest_cache/
-.venv/
-venv/
 *.session
-*.session-journal
+bot_session.session
+user.session
+session.session

@@ -52,9 +52,19 @@ def load_global_config() -> dict[str, Any]:
     if not GLOBAL_CONFIG_PATH.exists():
         raise FileNotFoundError("Отсутствует config/global.json")
     cfg = _read_json(GLOBAL_CONFIG_PATH)
+
     token = cfg.get("bot_token", "")
     if token.startswith("${") and token.endswith("}"):
         cfg["bot_token"] = os.getenv(token[2:-1], "")
+
+    if not cfg.get("user_session_string") and cfg.get("session_string"):
+        cfg["user_session_string"] = cfg.get("session_string")
+        print("DEPRECATED: use user_session_string instead of session_string", flush=True)
+
+    if not cfg.get("user_session_name") and cfg.get("session_name"):
+        cfg["user_session_name"] = cfg.get("session_name")
+        print("DEPRECATED: use user_session_name instead of session_name", flush=True)
+
     return cfg
 
 
@@ -461,8 +471,8 @@ async def main() -> None:
     if not global_cfg.get("bot_token"):
         raise RuntimeError("Не задан bot_token")
 
-    user_session_string = global_cfg.get("user_session_string") or global_cfg.get("session_string", "")
-    user_session_name = global_cfg.get("user_session_name") or global_cfg.get("session_name", "user.session")
+    user_session_string = global_cfg.get("user_session_string", "")
+    user_session_name = global_cfg.get("user_session_name", "user.session")
     bot_session_name = global_cfg.get("bot_session_name", "bot_session")
 
     if not user_session_string and str(user_session_name) == str(bot_session_name):
