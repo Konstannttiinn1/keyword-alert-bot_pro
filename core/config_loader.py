@@ -45,33 +45,30 @@ def normalize_phone(raw: str) -> str:
     return clean
 
 
-def _pick(name: str, env_value: str | None, global_cfg: dict, legacy_cfg: dict) -> tuple[str | None, str]:
+def _pick(name: str, env_value: str | None, global_cfg: dict) -> tuple[str | None, str]:
     if env_value not in {None, ""}:
         return env_value, "env"
     if name in global_cfg and str(global_cfg.get(name, "")) != "":
         return str(global_cfg.get(name)), "config/global.json"
-    if name in legacy_cfg and str(legacy_cfg.get(name, "")) != "":
-        return str(legacy_cfg.get(name)), "config.json (deprecated fallback)"
     return None, "missing"
 
 
 def load_telegram_credentials(require_phone: bool = False) -> TelegramCredentials:
     load_dotenv(BASE_DIR / ".env")
 
-    global_cfg = _read_json(GLOBAL_CONFIG_PATH)
-    legacy_cfg = {}
-    if not global_cfg:
-        legacy_cfg = _read_json(LEGACY_CONFIG_PATH)
-        if legacy_cfg:
-            print("DEPRECATED: config.json fallback is used because config/global.json is missing or invalid", flush=True)
+    if LEGACY_CONFIG_PATH.exists():
+        print("WARNING: config.json больше не используется, удалите файл", flush=True)
 
-    api_id_raw, api_id_src = _pick("api_id", os.getenv("TG_API_ID"), global_cfg, legacy_cfg)
-    api_hash, api_hash_src = _pick("api_hash", os.getenv("TG_API_HASH"), global_cfg, legacy_cfg)
+    global_cfg = _read_json(GLOBAL_CONFIG_PATH)
+    if not global_cfg:
+        raise RuntimeError("config/global.json не найден или повреждён")
+
+    api_id_raw, api_id_src = _pick("api_id", os.getenv("TG_API_ID"), global_cfg)
+    api_hash, api_hash_src = _pick("api_hash", os.getenv("TG_API_HASH"), global_cfg)
 
     phone_env = os.getenv("TG_PHONE")
     phone_cfg = global_cfg.get("tg_phone") or global_cfg.get("phone")
-    phone_legacy = legacy_cfg.get("tg_phone") or legacy_cfg.get("phone")
-    phone_raw, phone_src = _pick("tg_phone", phone_env, {"tg_phone": phone_cfg}, {"tg_phone": phone_legacy})
+    phone_raw, phone_src = _pick("tg_phone", phone_env, {"tg_phone": phone_cfg})
 
     if api_id_raw is None or api_hash is None:
         raise RuntimeError("Missing Telegram API credentials: set TG_API_ID/TG_API_HASH or api_id/api_hash in config/global.json")
